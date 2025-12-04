@@ -179,7 +179,7 @@ export default function App() {
               <Globe className="text-white" size={24} />
             </div>
             <div>
-              <h1 className="font-bold text-slate-800 text-lg leading-tight">TripAI</h1>
+              <h1 className="font-bold text-slate-800 text-lg leading-tight">KIRA</h1>
               <p className="text-xs text-slate-500 font-medium">Real-time Map Agent</p>
             </div>
           </div>
