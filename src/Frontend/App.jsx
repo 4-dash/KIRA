@@ -3,12 +3,6 @@ import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, B
 
 // --- Konfiguration & Mock-Daten ---
 
-const SUGGESTIONS = [
-  { id: 1, name: "City Center Hotel", rating: 4.8, type: "Unterkunft", price: "$$$" },
-  { id: 2, name: "Nationalmuseum", rating: 4.6, type: "Kultur", price: "$" },
-  { id: 3, name: "Berühmter Lebensmittelmarkt", rating: 4.9, type: "Gastronomie", price: "$$" },
-];
-
 const INITIAL_MESSAGE = {
   id: 1,
   sender: 'ai',
@@ -321,7 +315,6 @@ export default function App() {
           name: `${lat.toFixed(4)}, ${lng.toFixed(4)}`
         });
 
-        setRecommendations(SUGGESTIONS);
         
         // Chat-Nachricht
         setMessages(prev => [...prev, {
@@ -382,7 +375,6 @@ export default function App() {
           name: displayName
         });
         
-        setRecommendations(SUGGESTIONS);
 
         setMessages(prev => [...prev, { 
           id: Date.now() + 1, 
