@@ -266,7 +266,8 @@ export default function App() {
       if (!isResizing || !containerRef.current) return;
 
       const rect = containerRef.current.getBoundingClientRect();
-      const newHeight = ((e.clientY - rect.top) / rect.height) * 100;
+      const mapDiv = mapContainerRef.current.parentElement.getBoundingClientRect();
+      const newHeight = ((e.clientY - mapDiv.top) / rect.height) * 100;
 
       if (newHeight > 20 && newHeight < 80) {
         setMapHeight(newHeight);
