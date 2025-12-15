@@ -289,7 +289,7 @@ export default function App() {
               marginHeight={0} 
               marginWidth={0} 
               src={getMapUrl()} 
-              className="w-full h-full grayscale-[0.2] contrast-[1.1]"
+              className="w-full h-full"
               title="OpenStreetMap"
             ></iframe>
           )}
