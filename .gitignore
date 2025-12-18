@@ -30,7 +30,7 @@ ipython_config.py
 .pdm-python
 .pdm-build/
 
-__pypackages__
+__pycache__
 
 .pixi
 
