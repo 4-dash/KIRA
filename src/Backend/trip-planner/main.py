@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from typing import Any, Dict, List
 import httpx
 
+import os
+
 import json
 import asyncio
 import math
@@ -40,6 +42,7 @@ class BayernCloudPOIRequest(BaseModel):
 # bayerncloud
 BAYERNCLOUD_API_KEY = ""
 BAYERNCLOUD_API_BASE_URL = ""
+BAYERNCLOUD_DATA_DIR = "bayerncloud-data"
 
 @app.post("/fetch-bc-data")
 async def get_bayerncloud_poi_data(request: BayernCloudPOIRequest):
@@ -95,7 +98,7 @@ async def get_bayerncloud_poi_data(request: BayernCloudPOIRequest):
                 # 4. Save this specific endpoint's data to its own file
                 try:
                     def save_file(data, fname):
-                        with open(fname, "w", encoding="utf-8") as f:
+                        with open(os.path.join(BAYERNCLOUD_DATA_DIR, fname), "w", encoding="utf-8") as f:
                             json.dump(data, f, ensure_ascii=False, indent=4)
                     
                     await to_thread.run_sync(save_file, master_data, filename)
