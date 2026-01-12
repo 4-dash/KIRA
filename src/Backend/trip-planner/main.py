@@ -69,20 +69,17 @@ async def get_bayerncloud_poi_data(request: BayernCloudPOIRequest):
     async with httpx.AsyncClient(timeout=60.0) as client:
         for endpoint_id in endpoint_ids:
             for subtree in with_subtrees:
-                # 1. Fetch Page 1 - Get Master Template
                 master_data, total_items = await fetch_external_data(client, endpoint_id, subtree, page=1, size=PAGE_SIZE)
                 
                 if "error" in master_data:
                     continue
                 
-                # 2. Extract the name for the filename
-                # Falls back to endpoint_id if 'slug' or 'name' is missing
                 meta_collection = master_data.get("meta", {}).get("collection", {})
                 endpoint_slug = meta_collection.get("slug") or meta_collection.get("name") or endpoint_id
-                # Sanitize slug: replace spaces with underscores if name was used
+
                 filename = f"bayerncloud_{endpoint_slug.replace(' ', '_').lower()}.json"
 
-                # 3. Handle Pagination
+
                 total_pages = math.ceil(total_items / PAGE_SIZE)
                 if total_pages > 1:
                     tasks = [
@@ -95,7 +92,7 @@ async def get_bayerncloud_poi_data(request: BayernCloudPOIRequest):
                         if "@graph" in page_data:
                             master_data["@graph"].extend(page_data["@graph"])
 
-                # 4. Save this specific endpoint's data to its own file
+
                 try:
                     def save_file(data, fname):
                         with open(os.path.join(BAYERNCLOUD_DATA_DIR, fname), "w", encoding="utf-8") as f:
