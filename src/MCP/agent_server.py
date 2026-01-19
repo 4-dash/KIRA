@@ -18,7 +18,7 @@ INDEX_NAME = "travel-plans"
 
 # Azure Config prüfen
 if not os.getenv("AZURE_OPENAI_API_KEY"):
-    raise ValueError("❌ FEHLER: AZURE_OPENAI_API_KEY fehlt in der .env Datei!")
+    raise ValueError(" FEHLER: AZURE_OPENAI_API_KEY fehlt in der .env Datei!")
 
 # 2. LLM SETUP (Für RAG/Wissen - optional, aber gut zu haben)
 llm = AzureOpenAI(
@@ -52,7 +52,7 @@ def get_coords(target_name: str):
                     if stop['name'].lower() == target_name.lower(): # Toleranter Vergleich
                         return stop['lat'], stop['lon']
     except Exception as e:
-        print(f"⚠️ Fehler bei Koordinatensuche: {e}")
+        print(f" Fehler bei Koordinatensuche: {e}")
     return None, None
 
 def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
@@ -124,14 +124,14 @@ def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
         else:
             trip_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
     except:
-        return "❌ Fehler: Ich konnte das Datumsformat nicht verstehen. Bitte nutze 'YYYY-MM-DD HH:MM'."
+        return " Fehler: Ich konnte das Datumsformat nicht verstehen. Bitte nutze 'YYYY-MM-DD HH:MM'."
 
     # 2. Koordinaten holen
     start_lat, start_lon = get_coords(start)
     end_lat, end_lon = get_coords(end)
 
     if not start_lat or not end_lat:
-        return f"❌ Ich konnte die Koordinaten für '{start}' oder '{end}' nicht finden. Sind die Namen korrekt?"
+        return f" Ich konnte die Koordinaten für '{start}' oder '{end}' nicht finden. Sind die Namen korrekt?"
 
     # 3. OTP abfragen
     data = query_otp_api(start_lat, start_lon, end_lat, end_lon, trip_time)
@@ -141,7 +141,7 @@ def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
         itinerary = data['data']['plan']['itineraries'][0]
         
         # Zusammenfassung bauen
-        summary = f"✅ Route gefunden für {trip_time.strftime('%d.%m.%Y')}:\n"
+        summary = f" Route gefunden für {trip_time.strftime('%d.%m.%Y')}:\n"
         
         for leg in itinerary['legs']:
             mode = leg['mode']
@@ -155,9 +155,9 @@ def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
             line = route_info.get('shortName') or route_info.get('longName') or ""
             
             if mode == "WALK":
-                summary += f"🚶 Laufweg ({int(leg['duration']/60)} min) von {origin} nach {dest}\n"
+                summary += f" Laufweg ({int(leg['duration']/60)} min) von {origin} nach {dest}\n"
             else:
-                summary += f"🚆 {mode} {line}: Abfahrt {start_t} ({origin}) -> Ankunft {end_t} ({dest})\n"
+                summary += f" {mode} {line}: Abfahrt {start_t} ({origin}) -> Ankunft {end_t} ({dest})\n"
 
         # 5. Optional: In OpenSearch speichern (Loggen)
         try:
@@ -174,7 +174,7 @@ def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
 
         return summary
     else:
-        return "⚠️ Leider keine Verbindung gefunden. Vielleicht fahren um diese Zeit keine Züge?"
+        return " Leider keine Verbindung gefunden. Vielleicht fahren um diese Zeit keine Züge?"
 
 if __name__ == "__main__":
     mcp.run()

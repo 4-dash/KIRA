@@ -18,7 +18,7 @@ DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o")
 API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview")
 
 if not AZURE_API_KEY or not AZURE_ENDPOINT:
-    print("❌ FEHLER: Bitte stelle sicher, dass deine .env Datei existiert und gefüllt ist.")
+    print(" FEHLER: Bitte stelle sicher, dass deine .env Datei existiert und gefüllt ist.")
     sys.exit(1)
 
 # Azure Client initialisieren
@@ -58,8 +58,8 @@ async def run_chat_loop():
                     }
                 })
 
-            print(f"✅ Verbunden! {len(openai_tools)} Tools geladen.")
-            print("💬 Du kannst jetzt mit deinem Agenten chatten. (Schreibe 'exit' zum Beenden)")
+            print(f" Verbunden! {len(openai_tools)} Tools geladen.")
+            print("Du kannst jetzt mit deinem Agenten chatten. (Schreibe 'exit' zum Beenden)")
 
             # C. CHAT LOOP
             messages = [
@@ -95,7 +95,7 @@ async def run_chat_loop():
                         func_name = tool_call.function.name
                         func_args = tool_call.function.arguments
                         
-                        print(f"🤖 Agent nutzt Tool: {func_name} ...")
+                        print(f" Agent nutzt Tool: {func_name} ...")
                         
                         # 3. Tool auf dem MCP Server ausführen
                         try:
