@@ -6,6 +6,10 @@ from otp_queries import GQL_PLAN
 from fastapi import Body, HTTPException
 from datetime import datetime, timedelta
 from otp_service import get_stop_coords
+from models import Trip, Day
+from storage_opensearch import store_trip
+from otp_service import extract_primary_transit_leg_from_plan
+
 
 
 app = FastAPI()
@@ -42,14 +46,25 @@ def plan_trip(req: PlanTripRequest):
 
     data = otp_graphql(GQL_PLAN, variables)
 
-    duration_sec = (
-        data["data"]["plan"]["itineraries"][0]["legs"][0]["duration"]
-    )
+    # your existing duration logic (unchanged)
+    duration_sec = data["data"]["plan"]["itineraries"][0]["legs"][0]["duration"]
+
+    # ✅ NEW: store Trip automatically (best-effort)
+    leg = extract_primary_transit_leg_from_plan(data)
+    if leg is not None:
+        trip = Trip(
+            name=f"Planned Trip: {leg.start_location.name} -> {leg.end_location.name}",
+            start_date=leg.departure_time,
+            end_date=leg.arrival_time,
+            days=[Day(date=leg.departure_time, itinerary=[leg], notes="Stored automatically")],
+        )
+        store_trip(trip)  # best-effort: returns doc_id or None, but we don't block the API
 
     return TripResponse(
         trip_id="otp-" + uuid.uuid4().hex[:8],
         duration_minutes=int(duration_sec / 60),
     )
+
 
 @app.post("/plan-by-stops")
 def plan_by_stops(payload: dict = Body(...)):

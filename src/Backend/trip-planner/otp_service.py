@@ -60,8 +60,8 @@ def extract_primary_transit_leg_from_plan(data: dict) -> Leg | None:
     itinerary = itineraries[0]
 
     for leg_data in itinerary.get("legs", []):
-        if leg_data.get("mode") not in TRANSIT_MODES:
-            continue
+        #if leg_data.get("mode") not in TRANSIT_MODES:
+            #continue
 
         route_info = leg_data.get("route") or {}
         carrier = (
