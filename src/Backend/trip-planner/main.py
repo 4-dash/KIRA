@@ -105,5 +105,17 @@ def plan_by_stops(payload: dict = Body(...)):
         "time": time,
     }
 
+    data = otp_graphql(GQL_PLAN, variables)
+
+    leg = extract_primary_transit_leg_from_plan(data)
+    if leg is not None:
+        trip = Trip(
+            name=f"Planned Trip: {leg.start_location.name} -> {leg.end_location.name}",
+            start_date=leg.departure_time,
+            end_date=leg.arrival_time,
+            days=[Day(date=leg.departure_time, itinerary=[leg], notes="Stored automatically")],
+        )
+        store_trip(trip)  # best-effort: returns doc_id or None, but we don't block the API
+
     # Return raw OTP result for now (no conversion yet)
-    return otp_graphql(GQL_PLAN, variables)
+    return data
