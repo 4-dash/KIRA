@@ -1,5 +1,8 @@
+import os
 import httpx
 from pydantic import BaseModel
+
+TRIP_PLANNER_URL = os.getenv("TRIP_PLANNER_URL", "http://trip-planner:8001")
 
 class TripRequest(BaseModel):
     origin: str
@@ -14,7 +17,7 @@ class TripResponse(BaseModel):
 async def call_trip_planner(req: TripRequest) -> TripResponse:
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8001/plan-trip",
+            f"{TRIP_PLANNER_URL}/plan-trip",
             json=req.model_dump()
         )
         response.raise_for_status()
