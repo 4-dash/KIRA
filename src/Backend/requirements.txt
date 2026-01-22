@@ -5,3 +5,9 @@ opensearch-py
 sentence-transformers
 beautifulsoup4
 lxml
+llama-index-core
+llama-index-llms-openai
+llama-index-embeddings-huggingface
+llama-index-vector-stores-opensearch
+opensearch-py
+
