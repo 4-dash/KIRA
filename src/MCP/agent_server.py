@@ -7,6 +7,8 @@ from llama_index.llms.azure_openai import AzureOpenAI
 from llama_index.core import Settings
 from opensearchpy import OpenSearch
 from typing import Optional
+import locale 
+import json
 
 # 1. KONFIGURATION LADEN
 load_dotenv()
@@ -19,6 +21,8 @@ INDEX_NAME = "travel-plans"
 # Azure Config prüfen
 if not os.getenv("AZURE_OPENAI_API_KEY"):
     raise ValueError(" FEHLER: AZURE_OPENAI_API_KEY fehlt in der .env Datei!")
+
+
 
 # 2. LLM SETUP (Für RAG/Wissen - optional, aber gut zu haben)
 llm = AzureOpenAI(
@@ -48,8 +52,13 @@ def get_coords(target_name: str):
         if response.status_code == 200:
             data = response.json()
             if 'data' in data and 'stops' in data['data']:
-                for stop in data['data']['stops']:
-                    if stop['name'].lower() == target_name.lower(): # Toleranter Vergleich
+                stops = data['data']['stops']
+                for stop in stops:
+                    if stop['name'].lower() == target_name.lower():
+                        return stop['lat'], stop['lon']
+
+                for stop in stops:
+                    if target_name.lower() in stop['name'].lower():
                         return stop['lat'], stop['lon']
     except Exception as e:
         print(f" Fehler bei Koordinatensuche: {e}")
@@ -108,6 +117,53 @@ def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
         end: Name der Zielhaltestelle (z.B. "Sonthofen")
         time_str: Uhrzeit (Format "YYYY-MM-DD HH:MM" oder "tomorrow 07:30")
     """
+
+@mcp.tool()
+def search_activities(keyword: str) -> str:
+    """
+    Sucht nach Freizeitaktivitäten, Restaurants, Sehenswürdigkeiten oder Orten im Allgäu.
+    Nutze dies, wenn der User nach 'Essen', 'Quad', 'Wandern' oder spezifischen Orten fragt.
+    """
+    url = "http://localhost:9200/_search"  # Sucht in allen Indizes
+    
+    # Eine einfache Suche nach dem Stichwort (Keyword)
+    query = {
+        "query": {
+            "multi_match": {
+                "query": keyword,
+                "fields": ["name", "description", "category", "city"] 
+            }
+        },
+        "size": 3  # Wir wollen nur die Top 3 Treffer
+    }
+
+    try:
+        response = requests.post(url, json=query, auth=('admin', 'admin'), verify=False) # Auth falls nötig, sonst weglassen
+        
+        if response.status_code == 200:
+            hits = response.json().get('hits', {}).get('hits', [])
+            if not hits:
+                return f"Keine Ergebnisse für '{keyword}' gefunden."
+            
+            result_text = f"Gefundene Orte für '{keyword}':\n"
+            for hit in hits:
+                source = hit['_source']
+                name = source.get('name', 'Unbekannter Ort')
+                desc = source.get('description', 'Keine Beschreibung')
+                city = source.get('city', '')
+                # Falls Adresse vorhanden, anzeigen
+                street = source.get('street', '')
+                
+                result_text += f"- **{name}** in {city} ({desc})\n"
+                if street:
+                    result_text += f"  Adresse: {street}\n"
+            
+            return result_text
+        else:
+            return f"Fehler bei der Suche: Server antwortete mit {response.status_code}"
+            
+    except Exception as e:
+        return f"Verbindungsfehler zur Datenbank: {e}"
     
 
     # 1. Datum parsen

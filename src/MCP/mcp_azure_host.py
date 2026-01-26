@@ -3,6 +3,8 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
+from datetime import datetime
+import locale
 
 # OpenAI & MCP Bibliotheken
 from openai import AzureOpenAI
@@ -27,6 +29,10 @@ client = AzureOpenAI(
     api_key=AZURE_API_KEY,
     api_version=API_VERSION
 )
+try:
+    locale.setlocale(locale.LC_TIME, 'de_DE.UTF-8')
+except:
+    pass
 
 # 2. MCP SERVER KONFIGURATION
 # Wir nutzen sys.executable, um sicherzustellen, dass wir dieselbe stabile Python-Version nutzen
@@ -60,6 +66,19 @@ async def run_chat_loop():
 
             print(f" Verbunden! {len(openai_tools)} Tools geladen.")
             print("Du kannst jetzt mit deinem Agenten chatten. (Schreibe 'exit' zum Beenden)")
+
+            today_str = datetime.now().strftime("%A, %d.%m.%Y")
+
+            system_instruction = f"""
+    Du bist KIRA, ein intelligenter Reiseassistent für das Allgäu.
+    
+    WICHTIGE INFORMATION:
+    - Heute ist: {today_str}.
+    - Wenn der Nutzer sagt "morgen", "übermorgen" oder "nächsten Freitag", 
+      rechne das Datum basierend auf dem heutigen Tag aus und nutze das Format YYYY-MM-DD für die Tools.
+    
+    Verhalte dich hilfreich und präzise.
+    """
 
             # C. CHAT LOOP
             messages = [
