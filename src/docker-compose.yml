@@ -1,0 +1,124 @@
+version: "3.9"
+
+services:
+  otp:
+    image: opentripplanner/opentripplanner:latest
+    container_name: otp
+    ports:
+      - "8080:8080"
+    working_dir: /var/opentripplanner
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xmx4g"
+    volumes:
+      - ./otp-data:/var/opentripplanner
+    command:
+      - "--load"
+      - "--serve"
+
+  opensearch:
+    image: opensearchproject/opensearch:2
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - plugins.security.disabled=true
+      - OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=KiraTestHype40!
+    ports:
+      - "9200:9200"
+    volumes:
+      - os-data:/usr/share/opensearch/data
+    restart: unless-stopped
+
+  trip-planner:
+    build: ./Backend/trip-planner
+    container_name: trip-planner
+    environment:
+      - OTP_URL=http://otp:8080/otp/routers/default/index/graphql
+      - OTP_TIMEOUT_SEC=30
+      - OPENSEARCH_ENABLED=true
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - OPENSEARCH_INDEX=travel-plans
+      
+    ports:
+      - "8001:8001"
+    depends_on:
+      - otp
+      - opensearch
+    restart: unless-stopped
+    
+    
+  api-gateway:
+    build: ./Backend/api-gateway
+    container_name: api-gateway
+    environment:
+      - TRIP_PLANNER_URL=http://trip-planner:8001
+      - GATEWAY_TIMEOUT_SEC=30
+      - BAYERNCLOUD_API_KEY=${BAYERNCLOUD_API_KEY}
+      - BAYERNCLOUD_API_BASE_URL=${BAYERNCLOUD_API_BASE_URL}
+      - BAYERNCLOUD_DATA_DIR=/data/bayerncloud
+    volumes:
+      - bc-data:/data/bayerncloud
+    ports:
+      - "8000:8000"
+    depends_on:
+      - trip-planner
+    restart: unless-stopped
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:latest
+    container_name: dashboards
+    restart: unless-stopped
+    environment:
+      - 'OPENSEARCH_HOSTS=["http://opensearch:9200"]'
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - 5601:5601
+    depends_on:
+      - opensearch
+
+  neo4j:
+    image: neo4j:latest
+    container_name: neo4j-server
+    restart: unless-stopped
+    ports:
+      - "7474:7474" # HTTP Browser
+      - "7687:7687" # Bolt (Driver connection)
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_security_procedures_allowlist=apoc.*
+      - NEO4J_apoc_import_file_enabled=true
+      - NEO4J_apoc_import_file_useneo4jconfig=true
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+
+  ingester:
+    build: ./Backend/ingester
+    container_name: ingester
+    environment:
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - POI_INDEX=tourism-data-v6
+      - BAYERNCLOUD_DATA_DIR=/data/bayerncloud
+      - BAYERNCLOUD_FILE_PATTERN=bayerncloud*.json
+      - EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
+      - EMBED_DIM=384
+    volumes:
+      - bc-data:/data/bayerncloud
+    depends_on:
+      - opensearch
+    restart: "no"
+    
+ 
+
+
+
+
+volumes:
+  os-data:
+  bc-data:
+  neo4j_data:
+  neo4j_logs:

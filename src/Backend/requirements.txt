@@ -1,7 +1,0 @@
-fastapi[standard]
-httpx
-asyncio
-opensearch-py
-sentence-transformers
-beautifulsoup4
-lxml

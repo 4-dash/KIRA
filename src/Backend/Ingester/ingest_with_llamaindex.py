@@ -16,13 +16,18 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.opensearch import OpensearchVectorStore, OpensearchVectorClient
 
 # --- Konfiguration ---
-OPENSEARCH_HOST = 'localhost'
-OPENSEARCH_PORT = 9200
-OPENSEARCH_AUTH = None 
-INDEX_NAME = 'tourism-data-v6' # Neue Version V5
-DATA_DIR = 'trip-planner'
-FILE_PATTERN = 'bayerncloud*.json'
-EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "opensearch")
+OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
+OPENSEARCH_AUTH = None
+
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v6")
+
+DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "/data/bayerncloud")
+FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
+
+EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
+
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
