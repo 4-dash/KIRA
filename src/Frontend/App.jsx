@@ -1,5 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
+<<<<<<< Updated upstream
 import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle } from 'lucide-react';
+=======
+import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders,Train, Bus, Footprints, Clock, ArrowRight, Flag } from 'lucide-react';
+>>>>>>> Stashed changes
 
 // --- Configuration & Mock Data ---
 
@@ -19,19 +23,59 @@ const INITIAL_MESSAGE = {
 
 const ChatMessage = ({ msg }) => {
   const isAi = msg.sender === 'ai';
+  
+  // Wir prüfen, ob der Text ein JSON-Objekt für einen Trip ist
+  let tripData = null;
+  let displayText = msg.text;
+
+  // Einfacher Check: Beginnt es wie JSON? (Du kannst das robuster machen)
+  if (isAi && typeof msg.text === 'string' && msg.text.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(msg.text);
+      if (parsed.legs) {
+        tripData = parsed;
+        displayText = "Ich habe hier eine Verbindung für dich gefunden:";
+      }
+    } catch (e) {
+      // Kein valides JSON, normaler Text
+    }
+  }
+
   return (
     <div className={`flex w-full mb-4 ${isAi ? 'justify-start' : 'justify-end'}`}>
+<<<<<<< Updated upstream
       <div className={`flex max-w-[85%] md:max-w-[75%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
         <div className={`flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 ${isAi ? 'bg-indigo-100 text-indigo-600' : 'bg-emerald-100 text-emerald-600'}`}>
           {isAi ? <Bot size={18} /> : <User size={18} />}
         </div>
         <div className={`p-3 rounded-2xl text-sm shadow-sm ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-emerald-500 text-white rounded-tr-none'}`}>
           <p>{msg.text}</p>
+=======
+      <div className={`flex max-w-[90%] md:max-w-[80%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
+        <div className={`flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 ${isAi ? 'bg-slate-200 text-slate-600' : 'bg-slate-300 text-slate-700'}`}>
+          {isAi ? <Bot size={18} /> : <User size={18} />}
+        </div>
+        
+        <div className="flex flex-col">
+          {/* Die Textblase */}
+          <div className={`p-3 rounded-2xl text-sm shadow-sm ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none'}`}>
+            <p className="whitespace-pre-line">{displayText}</p>
+          </div>
+
+          {/* Falls Trip-Daten da sind -> Karte rendern */}
+          {tripData && (
+            <div className="mt-2 ml-1">
+              <TripCard data={tripData} />
+            </div>
+          )}
+>>>>>>> Stashed changes
         </div>
       </div>
     </div>
   );
 };
+
+
 
 const PlaceCard = ({ place }) => (
   <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow flex items-center justify-between group cursor-pointer">
@@ -56,6 +100,234 @@ const PlaceCard = ({ place }) => (
   </div>
 );
 
+<<<<<<< Updated upstream
+=======
+const FilterPanel = ({ isOpen, onClose, filters, setFilters }) => {
+  const toggleFilter = (category, id) => {
+    setFilters(prev => ({
+      ...prev,
+      [category]: prev[category].includes(id)
+        ? prev[category].filter(item => item !== id)
+        : [...prev[category], id]
+    }));
+  };
+
+  const clearFilters = () => {
+    setFilters({ types: [], priceRanges: [], ratings: [] });
+  };
+
+  const activeFilterCount = Object.values(filters).flat().length;
+
+  return (
+    <>
+      {isOpen && (
+        <div 
+          className="fixed inset-0 bg-black/40 z-30 backdrop-blur-sm transition-opacity rounded-3xl"
+          onClick={onClose}
+        />
+      )}
+
+      <div className={`
+        fixed md:absolute top-0 left-0 w-full md:w-80 h-full bg-white shadow-2xl z-40
+        transition-transform duration-300 ease-out overflow-y-auto rounded-r-3xl md:rounded-3xl
+        ${isOpen ? 'translate-x-0' : '-translate-x-full'}
+      `}>
+        
+        <div className="sticky top-0 bg-gradient-to-r from-slate-700 to-slate-800 text-white p-4 flex items-center justify-between shadow-lg rounded-tr-3xl md:rounded-t-3xl">
+          <div className="flex items-center gap-3">
+            <Sliders size={24} />
+            <h2 className="font-bold text-lg">Filter</h2>
+            {activeFilterCount > 0 && (
+              <span className="ml-2 px-2.5 py-0.5 bg-white text-slate-700 text-xs font-bold rounded-full">
+                {activeFilterCount}
+              </span>
+            )}
+          </div>
+          <button 
+            onClick={onClose}
+            className="p-1 hover:bg-slate-600 rounded-lg transition-colors"
+          >
+            <X size={24} />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-6">
+          
+          <div>
+            <h3 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
+              <MapPin size={16} />
+              Aktivitätstypen
+            </h3>
+            <div className="grid grid-cols-2 gap-2">
+              {FILTER_OPTIONS.types.map(type => (
+                <button
+                  key={type.id}
+                  onClick={() => toggleFilter('types', type.id)}
+                  className={`
+                    p-3 rounded-xl font-medium text-sm transition-all border-2
+                    ${filters.types.includes(type.id)
+                      ? 'bg-slate-700 text-white border-slate-700 shadow-lg shadow-slate-300'
+                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
+                    }
+                  `}
+                >
+                  {type.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
+              <Filter size={16} />
+              Preisbereich
+            </h3>
+            <div className="space-y-2">
+              {FILTER_OPTIONS.priceRanges.map(price => (
+                <button
+                  key={price.id}
+                  onClick={() => toggleFilter('priceRanges', price.id)}
+                  className={`
+                    w-full p-3 rounded-xl font-medium text-sm text-left transition-all border-2
+                    ${filters.priceRanges.includes(price.id)
+                      ? 'bg-slate-700 text-white border-slate-700 shadow-lg shadow-slate-300'
+                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
+                    }
+                  `}
+                >
+                  <span className="font-bold mr-2">{price.icon}</span>
+                  {price.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
+              <Star size={16} />
+              Mindestbewertung
+            </h3>
+            <div className="space-y-2">
+              {FILTER_OPTIONS.ratings.map(rating => (
+                <button
+                  key={rating.id}
+                  onClick={() => toggleFilter('ratings', rating.id)}
+                  className={`
+                    w-full p-3 rounded-xl font-medium text-sm text-left transition-all border-2
+                    ${filters.ratings.includes(rating.id)
+                      ? 'bg-slate-700 text-white border-slate-700 shadow-lg shadow-slate-300'
+                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
+                    }
+                  `}
+                >
+                  <Star size={16} className="inline mr-2" fill="currentColor" />
+                  {rating.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {activeFilterCount > 0 && (
+            <button
+              onClick={clearFilters}
+              className="w-full p-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-semibold transition-colors border border-slate-200"
+            >
+              Alle Filter löschen
+            </button>
+          )}
+        </div>
+      </div>
+    </>
+  );
+};
+
+const TripCard = ({ data }) => {
+  if (!data || !data.legs) return null;
+
+  return (
+    <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden my-3">
+      {/* Header: Zusammenfassung */}
+      <div className="bg-slate-50 p-4 border-b border-slate-100 flex justify-between items-center">
+        <div>
+          <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
+            {data.start} <ArrowRight size={14} /> {data.end}
+          </div>
+          <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+            <Clock size={12} /> {data.date} • {data.total_duration} Min.
+          </div>
+        </div>
+        <div className="bg-slate-200 text-slate-600 px-2 py-1 rounded-lg text-xs font-bold">
+          Trip
+        </div>
+      </div>
+
+      {/* Body: Timeline */}
+      <div className="p-4 relative">
+        {data.legs.map((leg, index) => {
+          const isLast = index === data.legs.length - 1;
+          
+          // Icon & Farbe je nach Modus wählen
+          let Icon = Footprints;
+          let colorClass = "bg-emerald-100 text-emerald-600 border-emerald-200";
+          if (leg.mode === 'RAIL') { Icon = Train; colorClass = "bg-blue-100 text-blue-600 border-blue-200"; }
+          if (leg.mode === 'BUS') { Icon = Bus; colorClass = "bg-amber-100 text-amber-600 border-amber-200"; }
+
+          return (
+            <div key={index} className="flex gap-3 relative pb-6 last:pb-0">
+              {/* Vertikale Linie (außer beim letzten Element) */}
+              {!isLast && (
+                <div className="absolute left-[15px] top-8 bottom-0 w-0.5 bg-slate-200" />
+              )}
+              
+              {/* Zeitspalte */}
+              <div className="w-12 text-xs font-bold text-slate-500 pt-2 text-right">
+                {leg.start_time}
+              </div>
+
+              {/* Icon Spalte */}
+              <div className="relative z-10">
+                <div className={`h-8 w-8 rounded-full border-2 flex items-center justify-center ${colorClass}`}>
+                  <Icon size={14} />
+                </div>
+              </div>
+
+              {/* Details Spalte */}
+              <div className="flex-1 pt-1">
+                <div className="font-bold text-sm text-slate-700">
+                  {leg.mode === 'WALK' ? 'Fußweg' : `${leg.mode} ${leg.line}`}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {leg.from} <span className="text-slate-300">→</span> {leg.to}
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1 uppercase tracking-wide">
+                  {leg.duration} min
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Ankunfts-Marker (Footer der Timeline) */}
+        <div className="flex gap-3 relative mt-6 pt-2 border-t border-slate-50 border-dashed">
+           <div className="w-12 text-xs font-bold text-slate-800 text-right">
+             {data.legs[data.legs.length - 1].end_time}
+           </div>
+           <div className="relative z-10">
+             <div className="h-8 w-8 rounded-full bg-slate-800 text-white flex items-center justify-center shadow-md">
+               <Flag size={14} />
+             </div>
+           </div>
+           <div className="flex-1 pt-1">
+             <div className="font-bold text-sm text-slate-800">Ziel erreicht</div>
+             <div className="text-xs text-slate-500">{data.end}</div>
+           </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+>>>>>>> Stashed changes
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([INITIAL_MESSAGE]);
@@ -87,6 +359,123 @@ export default function App() {
     setIsMounted(true);
   }, []);
 
+<<<<<<< Updated upstream
+=======
+  // Resize Handler
+  useEffect(() => {
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    const handleMouseMove = (e) => {
+      if (!isResizing || !containerRef.current) return;
+
+      const rect = containerRef.current.getBoundingClientRect();
+      const mapDiv = mapContainerRef.current.parentElement.getBoundingClientRect();
+      const newHeight = ((e.clientY - mapDiv.top) / rect.height) * 100;
+
+      if (newHeight > 20 && newHeight < 80) {
+        setMapHeight(newHeight);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
+  // Leaflet Karte initialisieren
+  useEffect(() => {
+    if (!isMounted || !mapContainerRef.current) return;
+
+    // Leaflet und die CSS laden
+    const leafletLink = document.createElement('link');
+    leafletLink.rel = 'stylesheet';
+    leafletLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+    document.head.appendChild(leafletLink);
+
+    const leafletScript = document.createElement('script');
+    leafletScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+    leafletScript.onload = () => {
+      // Initialisiere die Karte
+      const map = window.L.map(mapContainerRef.current).setView([mapState.lat, mapState.lon], 12);
+
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19,
+      }).addTo(map);
+
+      // Marker
+      const marker = window.L.marker([mapState.lat, mapState.lon]).addTo(map);
+
+      // Klick auf Karte
+      map.on('click', (e) => {
+        const { lat, lng } = e.latlng;
+        
+        // Marker aktualisieren
+        marker.setLatLng([lat, lng]);
+        
+        // State aktualisieren
+        setMapState({
+          lat,
+          lon: lng,
+          name: `${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        });
+
+        
+        // Chat-Nachricht
+        setMessages(prev => [...prev, {
+          id: Date.now(),
+          sender: 'ai',
+          text: `Du hast eine neue Position ausgewählt: ${lat.toFixed(4)}, ${lng.toFixed(4)}`
+        }]);
+      });
+
+      // Invalidate size nach kurzer Verzögerung
+      setTimeout(() => {
+        map.invalidateSize();
+      }, 100);
+
+      // Update Marker wenn sich mapState ändert
+      return () => {
+        map.remove();
+      };
+    };
+
+    document.body.appendChild(leafletScript);
+  }, [isMounted, mapState.lat, mapState.lon]);
+
+  const handleMouseDown = (e) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+    // --- NEW: Helper function to simulate a trip ---
+  const testTripCard = () => {
+    const mockTripJSON = JSON.stringify({
+      date: "2026-01-27",
+      start: "Kempten Hbf",
+      end: "Fischen",
+      total_duration: "34",
+      legs: [
+        { mode: "WALK", from: "Startpunkt", to: "Kempten Hbf", start_time: "07:30", end_time: "07:39", duration: 9 },
+        { mode: "RAIL", line: "RE17", from: "Kempten Hbf", to: "Immenstadt", start_time: "07:43", end_time: "07:55", duration: 12 },
+        { mode: "BUS", line: "45", from: "Immenstadt", to: "Fischen", start_time: "08:05", end_time: "08:17", duration: 12 }
+      ]
+    });
+
+    setMessages(prev => [...prev, { 
+      id: Date.now(), 
+      sender: 'ai', 
+      text: mockTripJSON 
+    }]);
+  };
+
+>>>>>>> Stashed changes
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -95,6 +484,8 @@ export default function App() {
     setInput('');
     setMessages(prev => [...prev, { id: Date.now(), sender: 'user', text: userText }]);
     setIsLoading(true);
+
+  
 
     try {
       const response = await fetch(
@@ -236,9 +627,31 @@ export default function App() {
               <Send size={18} />
             </button>
           </form>
+<<<<<<< Updated upstream
           
           <div className="mt-3 flex gap-2 overflow-x-auto pb-1 no-scrollbar">
             {['Tokyo', 'New York', 'London', 'Sydney'].map(city => (
+=======
+
+          <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
+            <button
+              onClick={() => setShowFilters(true)}
+              className="whitespace-nowrap px-4 py-2 bg-slate-700 hover:bg-slate-800 text-white text-sm font-semibold rounded-xl transition-colors shadow-md flex items-center gap-2"
+              title="Filter öffnen"
+            >
+              <Sliders size={16} />
+              Filter
+            </button>
+            <button
+              onClick={testTripCard}
+              className="whitespace-nowrap px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-xl transition-colors shadow-md flex items-center gap-2"
+            >
+              <Navigation size={16} />
+              Test Trip
+            </button>
+            {/* --- NEW BUTTON ENDS HERE --- */}
+            {['Allgäu', 'Bodensee', 'Lindau', 'Füssen'].map(city => (
+>>>>>>> Stashed changes
               <button 
                 key={city}
                 onClick={() => setInput(city)}
