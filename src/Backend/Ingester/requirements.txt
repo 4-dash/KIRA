@@ -1,0 +1,8 @@
+opensearch-py
+beautifulsoup4
+lxml
+sentence-transformers
+
+llama-index
+llama-index-embeddings-huggingface
+llama-index-vector-stores-opensearch
