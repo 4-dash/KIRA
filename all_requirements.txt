@@ -1,0 +1,5 @@
+-r src/Opensearch/requirements.txt
+-r src/MCP/requirements.txt
+-r src/Backend/trip-planner/requirements.txt
+-r src/Backend/Ingester/requirements.txt
+-r src/Backend/api-gateway/requirements.txt
