@@ -96,58 +96,62 @@ async def run_chat_loop():
                 
                 messages.append({"role": "user", "content": user_input})
 
-                # 1. Anfrage an GPT-4o
-                response = client.chat.completions.create(
-                    model=DEPLOYMENT_NAME,
-                    messages=messages,
-                    tools=openai_tools if openai_tools else None,
-                    tool_choice="auto"
-                )
-                
-                response_msg = response.choices[0].message
-                
-                # 2. Prüfen, ob GPT ein Tool nutzen will
-                if response_msg.tool_calls:
-                    messages.append(response_msg) # Verlauf speichern
-                    
-                    for tool_call in response_msg.tool_calls:
-                        func_name = tool_call.function.name
-                        func_args = tool_call.function.arguments
-                        
-                        print(f" Agent nutzt Tool: {func_name} ...")
-                        
-                        # 3. Tool auf dem MCP Server ausführen
-                        try:
-                            result = await session.call_tool(
-                                func_name,
-                                arguments=json.loads(func_args)
-                            )
-                            tool_output = str(result.content)
-                        except Exception as e:
-                            tool_output = f"Error executing tool: {str(e)}"
-
-                        # 4. Ergebnis an GPT zurücksenden
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_output
-                        })
-                    
-                    # 5. Finale Antwort generieren (mit dem Wissen aus dem Tool)
-                    final_response = client.chat.completions.create(
+               # --- START CHANGE: Loop for handling Retries/Multi-step tools ---
+                while True:
+                    # 1. Ask GPT-4o
+                    response = client.chat.completions.create(
                         model=DEPLOYMENT_NAME,
                         messages=messages,
-                        tools=openai_tools
+                        tools=openai_tools if openai_tools else None,
+                        tool_choice="auto"
                     )
-                    ai_text = final_response.choices[0].message.content
-                    print(f"KIRA: {ai_text}")
-                    messages.append(final_response.choices[0].message)
-                
-                else:
-                    # Keine Tool-Nutzung, einfache Antwort
-                    print(f"KIRA: {response_msg.content}")
-                    messages.append(response_msg)
+                    
+                    response_msg = response.choices[0].message
+                    messages.append(response_msg) # Always save the AI response immediately
+                    
+                    # 2. Check if GPT wants to use a tool
+                    if response_msg.tool_calls:
+                        for tool_call in response_msg.tool_calls:
+                            func_name = tool_call.function.name
+                            func_args = tool_call.function.arguments
+                            
+                            print(f" ⚙️ Agent nutzt Tool: {func_name} ...")
+                            
+                            # 3. Execute Tool
+                            try:
+                                result = await session.call_tool(
+                                    func_name,
+                                    arguments=json.loads(func_args)
+                                )
+                                # Clean up the output format
+                                tool_output = ""
+                                if result.content:
+                                    for item in result.content:
+                                        if hasattr(item, 'text'):
+                                            tool_output += item.text
+                                        else:
+                                            tool_output += str(item)
+                                else:
+                                    tool_output = "Success"
+                            except Exception as e:
+                                tool_output = f"Error executing tool: {str(e)}"
 
+                            # 4. Send Result back to GPT
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_output
+                            })
+                        
+                        # IMPORTANT: No 'break' here! 
+                        # The loop continues so GPT can read the result and decide 
+                        # if it needs to retry (fix the error) or answer you.
+                    
+                    else:
+                        # No tools used? Then this is the final answer.
+                        print(f"KIRA: {response_msg.content}")
+                        break # Break inner loop, wait for next user input
+                # --- END CHANGE ---
 if __name__ == "__main__":
     try:
         asyncio.run(run_chat_loop())

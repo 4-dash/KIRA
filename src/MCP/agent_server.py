@@ -1,5 +1,6 @@
 import os
 import requests
+import sys
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -7,66 +8,67 @@ from llama_index.llms.azure_openai import AzureOpenAI
 from llama_index.core import Settings
 from opensearchpy import OpenSearch
 from typing import Optional
-import locale 
-import json
 
 # 1. KONFIGURATION LADEN
 load_dotenv()
 
-# OTP & OpenSearch Config
+# --- DEINE ORIGINALE KONFIGURATION (UNVERÄNDERT) ---
 OTP_URL = "http://localhost:8080/otp/routers/default/index/graphql"
 OPENSEARCH_HOST = {'host': 'localhost', 'port': 9200}
 INDEX_NAME = "travel-plans"
-
+# ---------------------------------------------------
+def log(msg):
+    sys.stderr.write(f"[LOG] {msg}\n")
+    sys.stderr.flush()
 # Azure Config prüfen
 if not os.getenv("AZURE_OPENAI_API_KEY"):
-    raise ValueError(" FEHLER: AZURE_OPENAI_API_KEY fehlt in der .env Datei!")
+    log("WARNUNG: AZURE_OPENAI_API_KEY fehlt in der .env Datei!")
 
-
-
-# 2. LLM SETUP (Für RAG/Wissen - optional, aber gut zu haben)
-llm = AzureOpenAI(
-    model="gpt-4o",
-    deployment_name=os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o"),
-    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-    api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview"),
-    temperature=0
-)
-Settings.llm = llm
+# 2. LLM SETUP
+try:
+    llm = AzureOpenAI(
+        model="gpt-4o",
+        deployment_name=os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview"),
+        temperature=0
+    )
+    Settings.llm = llm
+except Exception as e:
+    log(f"LLM Fehler: {e}")
 
 # 3. INITIALISIERUNG MCP SERVER
 mcp = FastMCP("KIRA-Agent-Server")
 
-# --- HILFSFUNKTIONEN (Aus deinem robusten Skript) ---
+# --- HILFSFUNKTIONEN ---
 
 def get_coords(target_name: str):
-    """Sucht Koordinaten für einen Ortsnamen in OTP."""
-    query = """
-    {
-      stops { name lat lon }
-    }
+    """
+    FIX: Nutzt Nominatim (OpenStreetMap) statt OTP GraphQL.
+    Das war der Grund, warum 'Fischen' nicht gefunden wurde.
     """
     try:
-        response = requests.post(OTP_URL, json={"query": query}, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            if 'data' in data and 'stops' in data['data']:
-                stops = data['data']['stops']
-                for stop in stops:
-                    if stop['name'].lower() == target_name.lower():
-                        return stop['lat'], stop['lon']
-
-                for stop in stops:
-                    if target_name.lower() in stop['name'].lower():
-                        return stop['lat'], stop['lon']
+        headers = {'User-Agent': 'KIRA-Agent/1.0'}
+        url = f"https://nominatim.openstreetmap.org/search?format=json&q={target_name}"
+        
+        # Timeout etwas höher für langsame Verbindungen
+        r = requests.get(url, headers=headers, timeout=5)
+        
+        if r.status_code == 200 and len(r.json()) > 0:
+            lat = float(r.json()[0]['lat'])
+            lon = float(r.json()[0]['lon'])
+            return lat, lon
     except Exception as e:
-        print(f" Fehler bei Koordinatensuche: {e}")
+        log(f"Fehler bei Nominatim Suche nach '{target_name}': {e}")
+    
     return None, None
 
 def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
-    """Fragt die OTP 2.8 API nach einer Route."""
-    # GraphQL Query für OTP 2.8 (angepasst an deinen Erfolg vorhin)
+    """
+    Nutzt deine GraphQL URL für die Abfrage.
+    """
+    # Standard OTP v2 GraphQL Query
     query = """
     query PlanTrip($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!, $date: String!, $time: String!) {
       plan(
@@ -79,6 +81,7 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
         walkReluctance: 2.0
       ) {
         itineraries {
+          duration
           legs {
             mode
             startTime
@@ -92,6 +95,7 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
       }
     }
     """
+    
     variables = {
         "fromLat": from_lat, "fromLon": from_lon,
         "toLat": to_lat, "toLon": to_lon,
@@ -100,104 +104,58 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
     }
     
     try:
-        response = requests.post(OTP_URL, json={"query": query, "variables": variables}, timeout=10)
+        log(f"Sende GraphQL an: {OTP_URL}")
+        # Wir nutzen requests.post für GraphQL
+        response = requests.post(OTP_URL, json={"query": query, "variables": variables}, timeout=60)
         return response.json()
     except Exception as e:
+        log(f"OTP GraphQL Fehler: {e}")
         return {"error": str(e)}
 
-# --- DAS NEUE TOOL FÜR DEN AGENTEN ---
+# --- DAS TOOL FÜR DEN AGENTEN ---
 
 @mcp.tool()
 def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
     """
     Plant eine Reise mit öffentlichen Verkehrsmitteln (Zug/Bus).
-    
-    Args:
-        start: Name der Starthaltestelle (z.B. "Fischen")
-        end: Name der Zielhaltestelle (z.B. "Sonthofen")
-        time_str: Uhrzeit (Format "YYYY-MM-DD HH:MM" oder "tomorrow 07:30")
     """
-
-@mcp.tool()
-def search_activities(keyword: str) -> str:
-    """
-    Sucht nach Freizeitaktivitäten, Restaurants, Sehenswürdigkeiten oder Orten im Allgäu.
-    Nutze dies, wenn der User nach 'Essen', 'Quad', 'Wandern' oder spezifischen Orten fragt.
-    """
-    url = "http://localhost:9200/_search"  # Sucht in allen Indizes
-    
-    # Eine einfache Suche nach dem Stichwort (Keyword)
-    query = {
-        "query": {
-            "multi_match": {
-                "query": keyword,
-                "fields": ["name", "description", "category", "city"] 
-            }
-        },
-        "size": 3  # Wir wollen nur die Top 3 Treffer
-    }
-
-    try:
-        response = requests.post(url, json=query, auth=('admin', 'admin'), verify=False) # Auth falls nötig, sonst weglassen
-        
-        if response.status_code == 200:
-            hits = response.json().get('hits', {}).get('hits', [])
-            if not hits:
-                return f"Keine Ergebnisse für '{keyword}' gefunden."
-            
-            result_text = f"Gefundene Orte für '{keyword}':\n"
-            for hit in hits:
-                source = hit['_source']
-                name = source.get('name', 'Unbekannter Ort')
-                desc = source.get('description', 'Keine Beschreibung')
-                city = source.get('city', '')
-                # Falls Adresse vorhanden, anzeigen
-                street = source.get('street', '')
-                
-                result_text += f"- **{name}** in {city} ({desc})\n"
-                if street:
-                    result_text += f"  Adresse: {street}\n"
-            
-            return result_text
-        else:
-            return f"Fehler bei der Suche: Server antwortete mit {response.status_code}"
-            
-    except Exception as e:
-        return f"Verbindungsfehler zur Datenbank: {e}"
-    
+    log(f"🤖 Agent: Suche Route {start} -> {end} ({time_str})")
 
     # 1. Datum parsen
     try:
+        trip_time = datetime.now()
         if "tomorrow" in time_str.lower():
-            tomorrow = datetime.now() + timedelta(days=1)
-            # Versuche Uhrzeit aus "tomorrow 07:30" zu lesen
+            trip_time = trip_time + timedelta(days=1)
             parts = time_str.split()
-            if len(parts) > 1:
-                hour, minute = map(int, parts[1].split(':'))
-                trip_time = tomorrow.replace(hour=hour, minute=minute, second=0)
+            if len(parts) > 1 and ":" in parts[-1]:
+                h, m = map(int, parts[-1].split(':'))
+                trip_time = trip_time.replace(hour=h, minute=m, second=0)
             else:
-                trip_time = tomorrow.replace(hour=7, minute=30) # Default
-        else:
-            trip_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+                trip_time = trip_time.replace(hour=7, minute=30)
+        elif "-" in time_str:
+             try:
+                trip_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+             except:
+                pass
     except:
-        return " Fehler: Ich konnte das Datumsformat nicht verstehen. Bitte nutze 'YYYY-MM-DD HH:MM'."
+        return "Fehler: Datumsformat nicht erkannt."
 
-    # 2. Koordinaten holen
+    # 2. Koordinaten holen (JETZT REPARIERT MIT NOMINATIM)
     start_lat, start_lon = get_coords(start)
     end_lat, end_lon = get_coords(end)
 
     if not start_lat or not end_lat:
-        return f" Ich konnte die Koordinaten für '{start}' oder '{end}' nicht finden. Sind die Namen korrekt?"
+        return f"Ich konnte die Koordinaten für '{start}' oder '{end}' nicht finden (Nominatim)."
 
-    # 3. OTP abfragen
+    # 3. OTP abfragen (Nimmt deine GraphQL URL)
     data = query_otp_api(start_lat, start_lon, end_lat, end_lon, trip_time)
 
     # 4. Ergebnis auswerten
     if data and data.get('data') and data['data'].get('plan') and data['data']['plan'].get('itineraries'):
         itinerary = data['data']['plan']['itineraries'][0]
         
-        # Zusammenfassung bauen
-        summary = f" Route gefunden für {trip_time.strftime('%d.%m.%Y')}:\n"
+        duration = int(itinerary['duration'] / 60)
+        summary = f"✅ Route gefunden ({duration} Min) für {trip_time.strftime('%d.%m.%Y')}:\n"
         
         for leg in itinerary['legs']:
             mode = leg['mode']
@@ -206,16 +164,16 @@ def search_activities(keyword: str) -> str:
             origin = leg['from']['name']
             dest = leg['to']['name']
             
-            # Zug/Bus Details
-            route_info = leg.get('route') or {}
-            line = route_info.get('shortName') or route_info.get('longName') or ""
+            line = ""
+            if leg.get('route'):
+                line = leg['route'].get('shortName') or leg['route'].get('longName') or ""
             
             if mode == "WALK":
-                summary += f" Laufweg ({int(leg['duration']/60)} min) von {origin} nach {dest}\n"
+                summary += f"🚶 Laufweg ({int(leg['duration']/60)} min) -> {dest}\n"
             else:
-                summary += f" {mode} {line}: Abfahrt {start_t} ({origin}) -> Ankunft {end_t} ({dest})\n"
+                summary += f"🚆 {mode} {line}: {origin} ({start_t}) -> {dest} ({end_t})\n"
 
-        # 5. Optional: In OpenSearch speichern (Loggen)
+        # 5. Optional: In OpenSearch speichern (Deine Logik)
         try:
             client = OpenSearch(hosts=[OPENSEARCH_HOST], use_ssl=False, verify_certs=False)
             if client.indices.exists(index=INDEX_NAME):
@@ -224,13 +182,16 @@ def search_activities(keyword: str) -> str:
                     "summary": summary, "created": datetime.now()
                 }
                 client.index(index=INDEX_NAME, body=doc, refresh=True)
-                
         except:
-            pass # Fehler beim Speichern ignorieren, dem User trotzdem antworten
+            pass 
 
         return summary
     else:
-        return " Leider keine Verbindung gefunden. Vielleicht fahren um diese Zeit keine Züge?"
+        err = "Keine Verbindung gefunden."
+        if data.get("errors"):
+            log(f"OTP Error Details: {data['errors']}")
+            err += f" (Server: {data['errors'][0]['message']})"
+        return err
 
 if __name__ == "__main__":
     mcp.run()
