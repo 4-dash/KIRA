@@ -31,50 +31,129 @@ const FILTER_OPTIONS = {
 
 const ChatMessage = ({ msg }) => {
   const isAi = msg.sender === 'ai';
+  
+  // States to hold the parsed data
   let tripData = null;
+  let activityData = null; 
+  let multiStepData = null;
   let displayText = msg.text;
 
-  // VERBESSERTE JSON ERKENNUNG
-  // Wir suchen nach etwas, das wie ein JSON-Objekt aussieht, auch wenn Text davor steht.
+  // Logic to parse the AI response looking for JSON
   if (isAi && typeof msg.text === 'string') {
-    // Entferne Markdown Code-Blöcke falls vorhanden
+    // Clean up potential Markdown formatting (```json ... ```)
     const cleanText = msg.text.replace(/```json/g, '').replace(/```/g, '').trim();
     
     if (cleanText.startsWith('{') || cleanText.startsWith('[')) {
         try {
           const parsed = JSON.parse(cleanText);
-          if (parsed.legs || parsed.suggestions) { // Prüfen auf typische KIRA Daten
+          
+          // Case 1: Single Trip Plan
+          if (parsed.legs) { 
             tripData = parsed;
-            displayText = "Ich habe folgende Verbindung gefunden:"; // Standard-Text statt Rohdaten
+            displayText = "Ich habe folgende Verbindung gefunden:"; 
           }
-        } catch (e) {
-          // Kein gültiges JSON
+          // Case 2: List of Activities
+          else if (parsed.type === 'activity_list') {
+            activityData = parsed;
+            displayText = "Hier sind meine Empfehlungen:";
+          }
+          // Case 3: Complex Multi-Step Itinerary
+          else if (parsed.type === 'multi_step_plan') {
+             multiStepData = parsed;
+             displayText = parsed.intro || "Hier ist dein Reiseplan:";
+          }
+        } catch (e) { 
+          // If parsing fails, we just show the raw text
+          console.error("JSON Parse Error", e);
         }
     }
   }
 
   return (
     <div className={`flex w-full mb-4 ${isAi ? 'justify-start' : 'justify-end'}`}>
-      <div className={`flex max-w-[90%] md:max-w-[80%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
+      <div className={`flex max-w-[95%] md:max-w-[85%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
+        
+        {/* Avatar Bubble */}
         <div className={`shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 ${isAi ? 'bg-slate-200 text-slate-600' : 'bg-slate-300 text-slate-700'}`}>
           {isAi ? <Bot size={18} /> : <User size={18} />}
         </div>
         
-        <div className="flex flex-col">
-          <div className={`p-3 rounded-2xl text-sm shadow-sm ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none'}`}>
+        <div className="flex flex-col w-full">
+          {/* Main Text Bubble */}
+          <div className={`p-3 rounded-2xl text-sm shadow-sm w-fit ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none'}`}>
             <p className="whitespace-pre-line">{displayText}</p>
           </div>
+
+          {/* RENDER: Single Trip Card */}
           {tripData && (
             <div className="mt-2 ml-1">
               <TripCard data={tripData} />
             </div>
           )}
+
+          {/* RENDER: Activity List */}
+          {activityData && (
+            <div className="mt-2 ml-1">
+              <ActivityList data={activityData} />
+            </div>
+          )}
+
+          {/* RENDER: Multi-Step Timeline (The new feature) */}
+          {multiStepData && (
+            <div className="mt-4 space-y-0 ml-1 border-l-2 border-slate-200 pl-4">
+                {multiStepData.steps.map((step, idx) => (
+                    <div key={idx} className="relative">
+                      {/* --- NEU: TAG HEADER --- */}
+                        {step.type === 'header' && (
+                           <div className="mt-8 mb-4 first:mt-0">
+                               <div className="absolute -left-[25px] mt-1.5 w-4 h-4 rounded-full bg-slate-800 border-2 border-white z-10"></div>
+                               <h3 className="font-bold text-slate-800 text-lg ml-1">{step.title}</h3>
+                           </div>
+                        )}
+                        
+                        {/* Timeline Dot (Color changes if it's an error) */}
+                        <div className={`absolute -left-[21px] top-6 w-3 h-3 rounded-full border-2 border-white ${step.type === 'error' ? 'bg-red-300' : 'bg-slate-300'}`}></div>
+                        
+                        {/* 1. Successful Trip Segment */}
+                        {step.type === 'trip' && (
+                            <div className="mb-4">
+                                <div className="text-xs font-bold text-slate-400 mb-1 uppercase tracking-wider">Fahrt</div>
+                                <TripCard data={step.data} />
+                            </div>
+                        )}
+                        
+                        {/* 2. Activity Segment */}
+                        {step.type === 'activity' && (
+                            <div className="mb-6">
+                                <div className="text-xs font-bold text-indigo-400 mb-1 uppercase tracking-wider">Aktivität</div>
+                                <SinglePlaceCard place={step.data} />
+                            </div>
+                        )}
+
+                        {/* 3. Error Segment (This fixes the missing trips!) */}
+                        {step.type === 'error' && (
+                            <div className="mb-6">
+                                <div className="text-xs font-bold text-red-400 mb-1 uppercase tracking-wider">Route nicht möglich</div>
+                                <div className="bg-red-50 p-3 rounded-xl border border-red-100 flex gap-3 items-center text-red-600 mt-1">
+                                    <AlertCircle size={18} className="shrink-0" />
+                                    <div className="flex flex-col">
+                                      <span className="text-xs font-medium">{step.message}</span>
+                                      <span className="text-[10px] opacity-75">Prüfe die Entfernung oder Fahrplandaten.</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                    </div>
+                ))}
+            </div>
+          )}
+
         </div>
       </div>
     </div>
   );
 };
-
 
 
 const TripCard = ({ data }) => {
@@ -124,6 +203,18 @@ const TripCard = ({ data }) => {
   );
 };
 
+const SinglePlaceCard = ({ place }) => (
+    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex gap-4 my-2">
+        <div className="h-10 w-10 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center shrink-0">
+            <Star size={18} />
+        </div>
+        <div>
+            <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+            <p className="text-xs text-slate-600 line-clamp-2">{place.description}</p>
+        </div>
+    </div>
+);
+
 
 const FilterPanel = ({ isOpen, onClose, filters, setFilters }) => {
     // Vereinfachte Filter-Komponente
@@ -136,12 +227,32 @@ const FilterPanel = ({ isOpen, onClose, filters, setFilters }) => {
     )
 }
 
+const ActivityList = ({ data }) => {
+  return (
+    <div className="w-full mt-3 space-y-3">
+      <p className="text-sm text-slate-500 font-medium">Ich habe {data.items.length} Vorschläge für {data.location} gefunden:</p>
+      <div className="grid grid-cols-1 gap-3">
+        {data.items.map((item, idx) => (
+          <PlaceCard key={idx} place={item} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const PlaceCard = ({ place }) => (
-    <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm">
-        <h4 className="font-bold">{place.name}</h4>
+    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex gap-4">
+        {/* Platzhalter Icon/Bild */}
+        <div className="h-12 w-12 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center shrink-0">
+            <MapPin size={20} />
+        </div>
+        <div>
+            <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+            <div className="text-xs text-slate-500 font-bold mb-1 uppercase tracking-wider">{place.category}</div>
+            <p className="text-xs text-slate-600 leading-relaxed line-clamp-2">{place.description}</p>
+        </div>
     </div>
 );
-
 // --- MAIN APP ---
 
 export default function App() {
