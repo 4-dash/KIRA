@@ -1,5 +1,3 @@
-## WORKS
-
 import os
 import json
 import glob
@@ -12,7 +10,7 @@ from opensearchpy import OpenSearch, RequestsHttpConnection
 # LlamaIndex Imports
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.vector_stores.opensearch import OpensearchVectorStore, OpensearchVectorClient
 
 # --- Konfiguration ---
@@ -20,22 +18,34 @@ OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
-INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v7")
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v9")
 
 DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "paraphrase-multilingual-MiniLM-L12-v2")
-EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
+# Azure OpenAI Specifics
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "")
+AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "")
 
+# text-embedding-3-large uses 3072 dimensions
+EMBED_DIM = int(os.getenv("EMBED_DIM", "3072"))
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- LlamaIndex Settings ---
-logger.info(f"Lade Embedding Modell: {EMBEDDING_MODEL_NAME}...")
-embed_model = HuggingFaceEmbedding(model_name=f"sentence-transformers/{EMBEDDING_MODEL_NAME}")
+logger.info(f"Lade Azure OpenAI Embedding Modell: {AZURE_DEPLOYMENT_NAME}...")
+embed_model = AzureOpenAIEmbedding(
+    model="text-embedding-3-large",
+    deployment_name=AZURE_DEPLOYMENT_NAME,
+    api_key=AZURE_OPENAI_KEY,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_version=AZURE_API_VERSION,
+)
+
 Settings.embed_model = embed_model
 Settings.llm = None 
 
@@ -100,7 +110,7 @@ class RichLlamaIngestor:
                     # Vektor-Feld für die semantische Suche
                     "embedding": {
                         "type": "knn_vector",
-                        "dimension": 384,
+                        "dimension": EMBED_DIM,
                         "method": {
                             "name": "hnsw",
                             "engine": "faiss",
@@ -109,9 +119,7 @@ class RichLlamaIngestor:
                     },
                     
                     # --- GEOMETRIE ---
-                    # geo_point für POI/Hotel Standorte (lat,lon)
                     "location": {"type": "geo_point"},
-                    # geo_shape für Tour-Verläufe (MULTILINESTRING)
                     "geo_line": {"type": "geo_shape"},
                     
                     # --- FILTERBARE METADATEN ---
@@ -121,7 +129,7 @@ class RichLlamaIngestor:
                     "postal_code": {"type": "keyword"},
                     "slug": {"type": "keyword"},
                     
-                    # --- TOUR STATISTIKEN (Numerisch für Filterung) ---
+                    # --- TOUR STATISTIKEN ---
                     "ascent": {"type": "integer"},
                     "descent": {"type": "integer"},
                     "length_m": {"type": "integer"},
@@ -171,23 +179,19 @@ class RichLlamaIngestor:
             metadata['city'] = address.get('addressLocality', '')
             metadata['country'] = address.get('addressCountry', '')
 
-        # --- GEO & LINE (The specific fix for your request) ---
+        # --- GEO & LINE ---
         geo = raw_doc.get('geo', {})
         if isinstance(geo, dict):
-            # For POIs/Lodging: Handle Latitude/Longitude
             if geo.get('type') == 'GeoCoordinates':
                 lat = safe_float(geo.get('latitude'))
                 lon = safe_float(geo.get('longitude'))
                 if lat is not None and lon is not None:
                     metadata['location'] = f"{lat},{lon}"
             
-            # For Tours: Handle the GeoShape Line
             elif geo.get('type') == 'GeoShape':
-                # This captures the MULTILINESTRING Z string directly
                 metadata['geo_line'] = geo.get('line')
                 metadata['geo_id'] = geo.get('id')
 
-        # Fallback for Tour 'location' string (e.g., "POINT (10.0 48.0)")
         loc_field = raw_doc.get('location')
         if isinstance(loc_field, str) and "POINT" in loc_field:
             try:
@@ -196,7 +200,7 @@ class RichLlamaIngestor:
                     metadata['location'] = f"{coords[1]},{coords[0]}"
             except: pass
 
-        # --- TOUR SPECIFICS (dc: keys) ---
+        # --- TOUR SPECIFICS ---
         metadata['ascent'] = raw_doc.get('dc:ascent')
         metadata['descent'] = raw_doc.get('dc:descent')
         metadata['min_altitude'] = raw_doc.get('dc:minAltitude')
@@ -219,31 +223,28 @@ class RichLlamaIngestor:
             text=text_content,
             metadata=metadata,
             id_=metadata['source_id'] or None,
-            
-            # Keep the vector "clean" by excluding raw geometry and technical IDs
             excluded_embed_metadata_keys=[
                 'source_id', 'geo_line', 'geo_id', 'slug', 'copyright',
                 'ascent', 'descent', 'min_altitude', 'max_altitude', 
                 'length_m', 'duration_min', 'beds'
             ],
-            # Allow the LLM to see everything except the internal ID
             excluded_llm_metadata_keys=['source_id']
         )
         
         return doc
 
     def run(self):
-        # 1. Index vorbereiten (FAISS + Mappings)
+        # 1. Index vorbereiten
         self.create_index_if_not_exists()
         
         # 2. LlamaIndex Client verbinden
         client_wrapper = OpensearchVectorClient(
             endpoint=f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}",
             index=INDEX_NAME,
-            dim=384,
+            dim=EMBED_DIM,
             embedding_field="embedding",
             text_field="description",
-            method={"name": "hnsw", "engine": "faiss"}, # Wichtig!
+            method={"name": "hnsw", "engine": "faiss"},
             os_client=self.os_client
         )
         vector_store = OpensearchVectorStore(client_wrapper)
@@ -273,11 +274,9 @@ class RichLlamaIngestor:
             except Exception as e:
                 logger.error(f"Fehler in {file_path}: {e}")
 
-        # 4. Ingestieren mit Splitter (gegen Chunk-Size Fehler)
+        # 4. Ingestieren
         if all_documents:
             logger.info(f"Starte Ingestion von {len(all_documents)} Dokumenten...")
-            
-            # Wir nutzen einen Splitter, um sicherzugehen, dass riesige Metadaten nicht crashen
             splitter = SentenceSplitter(chunk_size=Settings.chunk_size, chunk_overlap=50)
             
             VectorStoreIndex.from_documents(
@@ -291,9 +290,5 @@ class RichLlamaIngestor:
             logger.warning("Keine Dokumente gefunden.")
 
 if __name__ == "__main__":
-    # Löschen des alten Index für sauberen Start (Optional)
-    # import requests
-    # requests.delete(f"http://localhost:9200/{INDEX_NAME}")
-    
     ingestor = RichLlamaIngestor()
     ingestor.run()
