@@ -20,7 +20,7 @@ OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
-INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v6")
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v7")
 
 DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
@@ -81,115 +81,154 @@ class RichLlamaIngestor:
         )
 
     def create_index_if_not_exists(self):
-        """Erstellt den Index manuell mit FAISS, bevor LlamaIndex ihn berührt."""
+        """
+        Erstellt den Index manuell mit FAISS und expliziten Mappings 
+        für Geometrie-Typen und technische Metadaten.
+        """
         index_body = {
             "settings": {
                 "index": {
-                    "knn": True
+                    "knn": True,
+                    "refresh_interval": "1s"
                 }
             },
             "mappings": {
                 "properties": {
-                    "description": {"type": "text"}, # Content Feld
+                    # LlamaIndex Standard Content Feld
+                    "description": {"type": "text"}, 
+                    
+                    # Vektor-Feld für die semantische Suche
                     "embedding": {
                         "type": "knn_vector",
                         "dimension": 384,
                         "method": {
                             "name": "hnsw",
-                            "engine": "faiss"
+                            "engine": "faiss",
+                            "space_type": "l2"
                         }
                     },
-                    # Wir mappen wichtige Metadaten explizit für Filterung
+                    
+                    # --- GEOMETRIE ---
+                    # geo_point für POI/Hotel Standorte (lat,lon)
+                    "location": {"type": "geo_point"},
+                    # geo_shape für Tour-Verläufe (MULTILINESTRING)
+                    "geo_line": {"type": "geo_shape"},
+                    
+                    # --- FILTERBARE METADATEN ---
                     "source_id": {"type": "keyword"},
-                    "city": {"type": "keyword"},
                     "type": {"type": "keyword"},
+                    "city": {"type": "keyword"},
                     "postal_code": {"type": "keyword"},
-                    "location": {"type": "geo_point"}
+                    "slug": {"type": "keyword"},
+                    
+                    # --- TOUR STATISTIKEN (Numerisch für Filterung) ---
+                    "ascent": {"type": "integer"},
+                    "descent": {"type": "integer"},
+                    "length_m": {"type": "integer"},
+                    "duration_min": {"type": "integer"},
+                    "max_altitude": {"type": "integer"},
+                    
+                    # --- LODGING / UNTERKUNFT ---
+                    "beds": {"type": "integer"},
+                    "price_range": {"type": "keyword"},
+                    
+                    # --- EVENTS ---
+                    "startDate": {"type": "date"},
+                    "endDate": {"type": "date"}
                 }
             }
         }
 
         if not self.os_client.indices.exists(index=INDEX_NAME):
-            self.os_client.indices.create(index=INDEX_NAME, body=index_body)
-            logger.info(f"Index '{INDEX_NAME}' erstellt.")
+            try:
+                self.os_client.indices.create(index=INDEX_NAME, body=index_body)
+                logger.info(f"Index '{INDEX_NAME}' mit Geo-Mappings erfolgreich erstellt.")
+            except Exception as e:
+                logger.error(f"Fehler beim Erstellen des Index: {e}")
         else:
-            logger.info(f"Index '{INDEX_NAME}' existiert bereits.")
+            logger.info(f"Index '{INDEX_NAME}' existiert bereits. Überspringe Erstellung.")
 
     def parse_to_document(self, raw_doc: Dict, filename: str) -> Document:
-        # 1. Text Content (Beschreibung)
+        # 1. Text Content
         raw_desc = raw_doc.get('description', '')
         text_content = clean_html(raw_desc)
         
         # 2. Metadaten Extrahieren
         metadata = {}
         
-        # Basis Infos
-        metadata['source_id'] = raw_doc.get('@id')
+        # Basis & IDs
+        metadata['source_id'] = raw_doc.get('id') or raw_doc.get('@id')
         metadata['name'] = raw_doc.get('name', 'Unbekannt')
         metadata['type'] = derive_type_from_filename(filename)
-        
-        # Adresse (WICHTIG für Embedding)
+        metadata['slug'] = raw_doc.get('slug')
+        metadata['copyright'] = raw_doc.get('copyrightNotice')
+
+        # --- ADDRESS ---
         address = raw_doc.get('address', {})
-        if address:
+        if isinstance(address, dict):
             metadata['street'] = address.get('streetAddress', '')
             metadata['postal_code'] = address.get('postalCode', '')
             metadata['city'] = address.get('addressLocality', '')
             metadata['country'] = address.get('addressCountry', '')
-        
-        # Kontakt (Wichtig für Agenten, aber vielleicht nicht fürs Embedding-Vektor?)
-        # Wir nehmen es mit rein, falls jemand nach "Telefonnummer von X" sucht.
-        metadata['website'] = raw_doc.get('url')
-        metadata['telephone'] = raw_doc.get('telephone')
 
-        # Fallback für Text: Wenn keine Beschreibung da ist, nutzen wir Name + Stadt + Typ
-        if not text_content:
-            text_content = f"{metadata['type']} namens {metadata['name']} in {metadata.get('city', 'Bayern')}."
-
-        # Spezifikationen (Events, Touren etc.)
-        if raw_doc.get('startDate'): metadata['startDate'] = raw_doc.get('startDate')
-        if raw_doc.get('endDate'): metadata['endDate'] = raw_doc.get('endDate')
-        
-        # Geo Location (Für Map-Filter, nicht unbedingt fürs Embedding wichtig)
+        # --- GEO & LINE (The specific fix for your request) ---
         geo = raw_doc.get('geo', {})
-        lat = safe_float(geo.get('latitude'))
-        lon = safe_float(geo.get('longitude'))
-        if lat is not None and lon is not None:
-            metadata['location'] = f"{lat},{lon}"
+        if isinstance(geo, dict):
+            # For POIs/Lodging: Handle Latitude/Longitude
+            if geo.get('type') == 'GeoCoordinates':
+                lat = safe_float(geo.get('latitude'))
+                lon = safe_float(geo.get('longitude'))
+                if lat is not None and lon is not None:
+                    metadata['location'] = f"{lat},{lon}"
+            
+            # For Tours: Handle the GeoShape Line
+            elif geo.get('type') == 'GeoShape':
+                # This captures the MULTILINESTRING Z string directly
+                metadata['geo_line'] = geo.get('line')
+                metadata['geo_id'] = geo.get('id')
 
-        # Öffnungszeiten (Stringifizieren)
-        ohs = raw_doc.get('openingHoursSpecification')
-        if ohs:
-            # Wir kürzen es etwas, falls es extrem lang ist, oder speichern es als String
-            metadata['openingHoursSpecification'] = str(ohs)[:1000] 
+        # Fallback for Tour 'location' string (e.g., "POINT (10.0 48.0)")
+        loc_field = raw_doc.get('location')
+        if isinstance(loc_field, str) and "POINT" in loc_field:
+            try:
+                coords = loc_field.replace("POINT (", "").replace(")", "").split()
+                if len(coords) >= 2:
+                    metadata['location'] = f"{coords[1]},{coords[0]}"
+            except: pass
+
+        # --- TOUR SPECIFICS (dc: keys) ---
+        metadata['ascent'] = raw_doc.get('dc:ascent')
+        metadata['descent'] = raw_doc.get('dc:descent')
+        metadata['min_altitude'] = raw_doc.get('dc:minAltitude')
+        metadata['max_altitude'] = raw_doc.get('dc:maxAltitude')
+        metadata['length_m'] = raw_doc.get('dc:length')
+        metadata['duration_min'] = raw_doc.get('dc:duration')
+
+        # --- ACCOMMODATION & EVENTS ---
+        metadata['beds'] = raw_doc.get('dc:totalNumberOfBeds')
+        metadata['price_range'] = raw_doc.get('priceRange')
+        metadata['startDate'] = raw_doc.get('startDate')
+        metadata['endDate'] = raw_doc.get('endDate')
+
+        # Fallback Text
+        if not text_content:
+            text_content = f"{metadata['name']} ({metadata['type']}) in {metadata.get('city', 'Bayern')}."
 
         # 3. Document erstellen
-        # HIER PASSIERT DIE MAGIE:
-        # Wir definieren NICHT 'street' oder 'city' in 'excluded_embed_metadata_keys'.
-        # Das heißt: LlamaIndex schreibt "City: Oberstdorf" MIT in den Vektor!
-        
         doc = Document(
             text=text_content,
             metadata=metadata,
             id_=metadata['source_id'] or None,
             
-            # Was soll NICHT in den Vektor (weil es den Kontext verwässert)?
+            # Keep the vector "clean" by excluding raw geometry and technical IDs
             excluded_embed_metadata_keys=[
-                'source_id', 
-                #'location', # Koordinaten als Zahlen verwirren das Sprachmodell oft
-                'website', 
-                #'openingHoursSpecification', # Zu komplexes JSON für Vektorsuche, aber gut für LLM Kontext
-                'telephone' 
+                'source_id', 'geo_line', 'geo_id', 'slug', 'copyright',
+                'ascent', 'descent', 'min_altitude', 'max_altitude', 
+                'length_m', 'duration_min', 'beds'
             ],
-            
-            # Was soll der LLM (GPT-4) NICHT sehen (um Token zu sparen)?
-            excluded_llm_metadata_keys=[
-                'source_id' 
-                #'location' # Der Agent braucht meist nur den Stadtnamen, selten GPS Koordinaten
-            ]
+            # Allow the LLM to see everything except the internal ID
+            excluded_llm_metadata_keys=['source_id']
         )
-        
-        # Optional: Template definieren, wie der Embedding-Text aussehen soll
-        # Standard ist "{key}: {value}". Wir lassen das so, das funktioniert gut.
         
         return doc
 
