@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional, Any, Dict
 import httpx
 import os
 import json
@@ -8,30 +8,57 @@ import asyncio
 import math
 from anyio import to_thread
 
-from client import TripRequest, TripResponse, call_trip_planner
+from chat_ws import handle_chat_websocket
 
 app = FastAPI()
 
+# ============================================================
+# WebSocket Chat (old frontend compatibility)
+# ============================================================
 
-# -----------------------------
-# Existing trip planning gateway
-# -----------------------------
+@app.websocket("/chat")
+async def chat_endpoint(websocket: WebSocket):
+    await handle_chat_websocket(websocket)
+
+
+# ============================================================
+# Trip Planning Gateway (proxies to trip-planner service)
+# ============================================================
+
+TRIP_PLANNER_URL = os.getenv("TRIP_PLANNER_URL", "http://trip-planner:8001").rstrip("/")
+
+
 class PlanTripRequest(BaseModel):
     origin: str
     destination: str
+    date: Optional[str] = None   # YYYY-MM-DD
+    time: Optional[str] = None   # HH:MM
 
 
-@app.post("/plan-trip", response_model=TripResponse)
-async def plan_trip(request: PlanTripRequest):
-    # Forward request to Trip Planner Service (KR3.2)
-    internal_request = TripRequest(**request.model_dump())
-    result = await call_trip_planner(internal_request)
-    return result
+@app.post("/plan-trip")
+async def plan_trip(request: PlanTripRequest) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "from_stop": request.origin,
+        "to_stop": request.destination,
+    }
+    if request.date is not None:
+        payload["date"] = request.date
+    if request.time is not None:
+        payload["time"] = request.time
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{TRIP_PLANNER_URL}/plan-by-stops",
+            json=payload
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
-# -----------------------------
+# ============================================================
 # BayernCloud ingestion (gateway-owned for now)
-# -----------------------------
+# ============================================================
+
 class BayernCloudPOIRequest(BaseModel):
     retrieve_data: bool
 
@@ -55,14 +82,14 @@ async def fetch_bayerncloud_pois(request: BayernCloudPOIRequest):
         )
 
     endpoint_ids: List[str] = [
-        "915cbd6f-4434-4723-a54d-046b43ad52c5",  # list_attractions
-        "9d164080-9226-4f32-9d07-c5a83e970a58",  # list_retail
-        "cf5cce8d-cc0c-4835-816a-d7c22e32394f",  # list_food
-        "e0ed98a3-4137-4e62-9227-eb084e292151",  # list_mobility
-        "0f102b60-cca7-4b80-ad6e-31bea5ea641c",  # list_nature
-        "58056461-59dc-42e2-9025-3c16ce6968d7",  # list_tracks
-        "7a71084c-3802-42bc-88e7-f5c7bd22354c",  # list_accommodations
-        "36a736f7-9e2d-4be5-b0f0-45ada2ff7013",  # list_current_events
+        "915cbd6f-4434-4723-a54d-046b43ad52c5",
+        "9d164080-9226-4f32-9d07-c5a83e970a58",
+        "cf5cce8d-cc0c-4835-816a-d7c22e32394f",
+        "e0ed98a3-4137-4e62-9227-eb084e292151",
+        "0f102b60-cca7-4b80-ad6e-31bea5ea641c",
+        "58056461-59dc-42e2-9025-3c16ce6968d7",
+        "7a71084c-3802-42bc-88e7-f5c7bd22354c",
+        "36a736f7-9e2d-4be5-b0f0-45ada2ff7013",
     ]
 
     with_subtrees: List[str] = ["2db595fc-c60d-46fe-85d1-a4da648910da"]
@@ -78,7 +105,6 @@ async def fetch_bayerncloud_pois(request: BayernCloudPOIRequest):
                 )
 
                 if "error" in master_data:
-                    # keep going, but record failure
                     file_info.append({"endpoint_id": endpoint_id, "error": master_data["error"]})
                     continue
 
@@ -87,6 +113,7 @@ async def fetch_bayerncloud_pois(request: BayernCloudPOIRequest):
                 filename = f"bayerncloud_{str(endpoint_slug).replace(' ', '_').lower()}.json"
 
                 total_pages = math.ceil((total_items or 0) / PAGE_SIZE)
+
                 if total_pages > 1:
                     tasks = [
                         fetch_external_data(client, endpoint_id, subtree, page=p, size=PAGE_SIZE)
@@ -104,7 +131,10 @@ async def fetch_bayerncloud_pois(request: BayernCloudPOIRequest):
                     os.path.join(BAYERNCLOUD_DATA_DIR, filename),
                 )
 
-                file_info.append({"file": filename, "count": len(master_data.get("@graph", []))})
+                file_info.append({
+                    "file": filename,
+                    "count": len(master_data.get("@graph", []))
+                })
 
     return {"status": "success", "processed_files": file_info}
 
@@ -118,10 +148,12 @@ async def fetch_external_data(
 ):
     url = f"{BAYERNCLOUD_API_BASE_URL}/{endpoint_id}"
     params = {"page[size]": size, "page[number]": page}
+
     payload = {
         "filter": {"classifications": {"in": {"withSubtree": [with_subtree]}}},
         "include": ["dc:additionalInformation", "dc:classification", "location", "address"],
     }
+
     headers = {
         "Authorization": f"Bearer {BAYERNCLOUD_API_KEY}",
         "Content-Type": "application/json",

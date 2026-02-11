@@ -96,21 +96,23 @@ services:
       - neo4j_logs:/logs
 
   ingester:
-    build: ./Backend/ingester
+    build: ./Backend/Ingester
     container_name: ingester
     environment:
       - OPENSEARCH_HOST=opensearch
       - OPENSEARCH_PORT=9200
-      - POI_INDEX=tourism-data-v6
+      - POI_INDEX=tourism-data-v-working
       - BAYERNCLOUD_DATA_DIR=/data/bayerncloud
-      - BAYERNCLOUD_FILE_PATTERN=bayerncloud*.json
-      - EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
-      - EMBED_DIM=384
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}
+      - AZURE_DEPLOYMENT_NAME=${AZURE_DEPLOYMENT_NAME}
     volumes:
       - bc-data:/data/bayerncloud
     depends_on:
       - opensearch
     restart: "no"
+    profiles: [ "ingest" ]
     
  
 

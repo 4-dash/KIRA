@@ -17,20 +17,20 @@ from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.vector_stores.opensearch import OpensearchVectorStore, OpensearchVectorClient
 
 # --- Konfiguration ---
-OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "opensearch")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
 INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v-working")
 
-DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
+DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "/data/bayerncloud")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
 # Azure OpenAI Specifics
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_API_KEY", os.getenv("AZURE_OPENAI_KEY", ""))
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "")
-AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "")
+AZURE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", os.getenv("AZURE_API_VERSION", ""))
 
 # text-embedding-3-large uses 3072 dimensions
 EMBED_DIM = int(os.getenv("EMBED_DIM", "3072"))
