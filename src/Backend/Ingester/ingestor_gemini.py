@@ -25,7 +25,7 @@ OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
 # BUMP VERSION: Using v7 to ensure new mapping is applied
-INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-with-shapes") 
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-with-shapes-v1") 
 
 DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
@@ -154,36 +154,44 @@ class RichLlamaIngestor:
         if raw_doc.get('startDate'): metadata['startDate'] = raw_doc.get('startDate')
         if raw_doc.get('endDate'): metadata['endDate'] = raw_doc.get('endDate')
         
-        # --- GEO POINT (Marker) ---
+        # --- GEO POINT (Standard logic) ---
         geo = raw_doc.get('geo', {})
         lat = safe_float(geo.get('latitude'))
         lon = safe_float(geo.get('longitude'))
+        
+        # Default assignment (can be overwritten below)
         if lat is not None and lon is not None:
             metadata['location'] = f"{lat},{lon}"
 
-        # --- NEW: GEO LINE (Shape) ---
-        # Extract the WKT string from geo.line
+        # --- NEW: GEO LINE (Shape & Start Point Overwrite) ---
         wkt_string = geo.get('line')
         
         if wkt_string:
             try:
-                # 1. Clean String: shapely sometimes prefers just "MULTILINESTRING" without "Z"
-                # But modern shapely often handles it. If it fails, we replace.
+                # 1. Clean & Parse WKT
                 clean_wkt = wkt_string.replace("MULTILINESTRING Z", "MULTILINESTRING")
-                
-                # 2. Parse WKT
                 shape_obj = wkt.loads(clean_wkt)
                 
-                # 3. Convert to GeoJSON Dict
+                # 2. Convert to GeoJSON for the 'geo_line' field
                 geojson = shape_mapping(shape_obj)
-                
-                # 4. Save to metadata
                 metadata['geo_line'] = geojson
+
+                # 3. OVERWRITE LOCATION with Start Point
+                # Handle both LineString and MultiLineString
+                first_geom = shape_obj.geoms[0] if hasattr(shape_obj, 'geoms') else shape_obj
+                
+                if first_geom.coords:
+                    # coords[0] gives (lon, lat, z) or (lon, lat)
+                    start_point = first_geom.coords[0]
+                    start_lon = start_point[0]
+                    start_lat = start_point[1]
+                    
+                    # Overwrite metadata location with "lat,lon"
+                    metadata['location'] = f"{start_lat},{start_lon}"
                 
             except Exception as e:
-                # Log warning but don't stop ingestion
-                logger.warning(f"Could not parse geo line for {metadata['name']}: {e}")
-        # -----------------------------
+                logger.warning(f"Could not parse geo line/start point for {metadata['name']}: {e}")
+        # -----------------------------------------------------
 
         ohs = raw_doc.get('openingHoursSpecification')
         if ohs:
@@ -199,18 +207,20 @@ class RichLlamaIngestor:
                 'source_id', 
                 'website', 
                 'telephone',
-                'geo_line', # <--- IMPORTANT: Do not embed the shape!
+                'geo_line', 
                 'location'
             ],
             
             excluded_llm_metadata_keys=[
                 'source_id',
-                'geo_line', # <--- IMPORTANT: Do not show raw shape to LLM
+                'geo_line', 
                 'location'
             ]
         )
         
         return doc
+
+
 
     def run(self):
         self.create_index_if_not_exists()
