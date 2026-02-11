@@ -1,5 +1,3 @@
-## WORKS
-
 import os
 import json
 import glob
@@ -9,10 +7,13 @@ from typing import Dict, Any, List
 from bs4 import BeautifulSoup
 from opensearchpy import OpenSearch, RequestsHttpConnection
 
+from shapely import wkt
+from shapely.geometry import mapping as shape_mapping
+
 # LlamaIndex Imports
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.node_parser import SentenceSplitter
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.vector_stores.opensearch import OpensearchVectorStore, OpensearchVectorClient
 
 # --- Konfiguration ---
@@ -20,22 +21,34 @@ OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
-INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v6")
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v-working")
 
 DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
-EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "paraphrase-multilingual-MiniLM-L12-v2")
-EMBED_DIM = int(os.getenv("EMBED_DIM", "384"))
+# Azure OpenAI Specifics
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "")
+AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "")
 
+# text-embedding-3-large uses 3072 dimensions
+EMBED_DIM = int(os.getenv("EMBED_DIM", "3072"))
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- LlamaIndex Settings ---
-logger.info(f"Lade Embedding Modell: {EMBEDDING_MODEL_NAME}...")
-embed_model = HuggingFaceEmbedding(model_name=f"sentence-transformers/{EMBEDDING_MODEL_NAME}")
+logger.info(f"Lade Azure OpenAI Embedding Modell: {AZURE_DEPLOYMENT_NAME}...")
+embed_model = AzureOpenAIEmbedding(
+    model="text-embedding-3-large",
+    deployment_name=AZURE_DEPLOYMENT_NAME,
+    api_key=AZURE_OPENAI_KEY,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_version=AZURE_API_VERSION,
+)
+
 Settings.embed_model = embed_model
 Settings.llm = None 
 
@@ -71,7 +84,6 @@ def derive_type_from_filename(filename: str) -> str:
 
 class RichLlamaIngestor:
     def __init__(self):
-        # 1. Low-Level Client
         self.os_client = OpenSearch(
             hosts=[{'host': OPENSEARCH_HOST, 'port': OPENSEARCH_PORT}],
             http_auth=OPENSEARCH_AUTH,
@@ -81,7 +93,7 @@ class RichLlamaIngestor:
         )
 
     def create_index_if_not_exists(self):
-        """Erstellt den Index manuell mit FAISS, bevor LlamaIndex ihn berührt."""
+        """Erstellt den Index manuell mit FAISS und GEO-Support."""
         index_body = {
             "settings": {
                 "index": {
@@ -90,21 +102,30 @@ class RichLlamaIngestor:
             },
             "mappings": {
                 "properties": {
-                    "description": {"type": "text"}, # Content Feld
+                    "description": {"type": "text"},
                     "embedding": {
                         "type": "knn_vector",
-                        "dimension": 384,
+                        "dimension": EMBED_DIM,
                         "method": {
                             "name": "hnsw",
                             "engine": "faiss"
                         }
                     },
-                    # Wir mappen wichtige Metadaten explizit für Filterung
                     "source_id": {"type": "keyword"},
                     "city": {"type": "keyword"},
                     "type": {"type": "keyword"},
                     "postal_code": {"type": "keyword"},
-                    "location": {"type": "geo_point"}
+                    
+                    # --- GEO MAPPINGS ---
+                    "location": {"type": "geo_point"},
+                    
+                    # NEW: Geo-Shape Mapping
+                    # ignore_z_value=True ensures the "881.0" elevation data doesn't crash the index
+                    "geo_line": {
+                        "type": "geo_shape",
+                        "ignore_z_value": True 
+                    }
+                    # --------------------
                 }
             }
         }
@@ -116,19 +137,17 @@ class RichLlamaIngestor:
             logger.info(f"Index '{INDEX_NAME}' existiert bereits.")
 
     def parse_to_document(self, raw_doc: Dict, filename: str) -> Document:
-        # 1. Text Content (Beschreibung)
+        # 1. Text Content
         raw_desc = raw_doc.get('description', '')
         text_content = clean_html(raw_desc)
         
         # 2. Metadaten Extrahieren
         metadata = {}
         
-        # Basis Infos
         metadata['source_id'] = raw_doc.get('@id')
         metadata['name'] = raw_doc.get('name', 'Unbekannt')
         metadata['type'] = derive_type_from_filename(filename)
         
-        # Adresse (WICHTIG für Embedding)
         address = raw_doc.get('address', {})
         if address:
             metadata['street'] = address.get('streetAddress', '')
@@ -136,75 +155,92 @@ class RichLlamaIngestor:
             metadata['city'] = address.get('addressLocality', '')
             metadata['country'] = address.get('addressCountry', '')
         
-        # Kontakt (Wichtig für Agenten, aber vielleicht nicht fürs Embedding-Vektor?)
-        # Wir nehmen es mit rein, falls jemand nach "Telefonnummer von X" sucht.
         metadata['website'] = raw_doc.get('url')
         metadata['telephone'] = raw_doc.get('telephone')
 
-        # Fallback für Text: Wenn keine Beschreibung da ist, nutzen wir Name + Stadt + Typ
         if not text_content:
             text_content = f"{metadata['type']} namens {metadata['name']} in {metadata.get('city', 'Bayern')}."
 
-        # Spezifikationen (Events, Touren etc.)
         if raw_doc.get('startDate'): metadata['startDate'] = raw_doc.get('startDate')
         if raw_doc.get('endDate'): metadata['endDate'] = raw_doc.get('endDate')
         
-        # Geo Location (Für Map-Filter, nicht unbedingt fürs Embedding wichtig)
+        # --- GEO POINT (Standard logic) ---
         geo = raw_doc.get('geo', {})
         lat = safe_float(geo.get('latitude'))
         lon = safe_float(geo.get('longitude'))
+        
+        # Default assignment (can be overwritten below)
         if lat is not None and lon is not None:
             metadata['location'] = f"{lat},{lon}"
 
-        # Öffnungszeiten (Stringifizieren)
+        # --- NEW: GEO LINE (Shape & Start Point Overwrite) ---
+        wkt_string = geo.get('line')
+        
+        if wkt_string:
+            try:
+                # 1. Clean & Parse WKT
+                clean_wkt = wkt_string.replace("MULTILINESTRING Z", "MULTILINESTRING")
+                shape_obj = wkt.loads(clean_wkt)
+                
+                # 2. Convert to GeoJSON for the 'geo_line' field
+                geojson = shape_mapping(shape_obj)
+                metadata['geo_line'] = geojson
+
+                # 3. OVERWRITE LOCATION with Start Point
+                # Handle both LineString and MultiLineString
+                first_geom = shape_obj.geoms[0] if hasattr(shape_obj, 'geoms') else shape_obj
+                
+                if first_geom.coords:
+                    # coords[0] gives (lon, lat, z) or (lon, lat)
+                    start_point = first_geom.coords[0]
+                    start_lon = start_point[0]
+                    start_lat = start_point[1]
+                    
+                    # Overwrite metadata location with "lat,lon"
+                    metadata['location'] = f"{start_lat},{start_lon}"
+                
+            except Exception as e:
+                logger.warning(f"Could not parse geo line/start point for {metadata['name']}: {e}")
+        # -----------------------------------------------------
+
         ohs = raw_doc.get('openingHoursSpecification')
         if ohs:
-            # Wir kürzen es etwas, falls es extrem lang ist, oder speichern es als String
             metadata['openingHoursSpecification'] = str(ohs)[:1000] 
 
         # 3. Document erstellen
-        # HIER PASSIERT DIE MAGIE:
-        # Wir definieren NICHT 'street' oder 'city' in 'excluded_embed_metadata_keys'.
-        # Das heißt: LlamaIndex schreibt "City: Oberstdorf" MIT in den Vektor!
-        
         doc = Document(
             text=text_content,
             metadata=metadata,
             id_=metadata['source_id'] or None,
-            
-            # Was soll NICHT in den Vektor (weil es den Kontext verwässert)?
             excluded_embed_metadata_keys=[
                 'source_id', 
-                #'location', # Koordinaten als Zahlen verwirren das Sprachmodell oft
                 'website', 
-                #'openingHoursSpecification', # Zu komplexes JSON für Vektorsuche, aber gut für LLM Kontext
-                'telephone' 
+                'telephone',
+                'geo_line', 
+                'location'
             ],
             
-            # Was soll der LLM (GPT-4) NICHT sehen (um Token zu sparen)?
             excluded_llm_metadata_keys=[
-                'source_id' 
-                #'location' # Der Agent braucht meist nur den Stadtnamen, selten GPS Koordinaten
+                'source_id',
+                'geo_line', 
+                'location'
             ]
         )
-        
-        # Optional: Template definieren, wie der Embedding-Text aussehen soll
-        # Standard ist "{key}: {value}". Wir lassen das so, das funktioniert gut.
         
         return doc
 
     def run(self):
-        # 1. Index vorbereiten (FAISS + Mappings)
+        # 1. Index vorbereiten
         self.create_index_if_not_exists()
         
         # 2. LlamaIndex Client verbinden
         client_wrapper = OpensearchVectorClient(
             endpoint=f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}",
             index=INDEX_NAME,
-            dim=384,
+            dim=EMBED_DIM,
             embedding_field="embedding",
             text_field="description",
-            method={"name": "hnsw", "engine": "faiss"}, # Wichtig!
+            method={"name": "hnsw", "engine": "faiss"},
             os_client=self.os_client
         )
         vector_store = OpensearchVectorStore(client_wrapper)
@@ -234,11 +270,9 @@ class RichLlamaIngestor:
             except Exception as e:
                 logger.error(f"Fehler in {file_path}: {e}")
 
-        # 4. Ingestieren mit Splitter (gegen Chunk-Size Fehler)
+        # 4. Ingestieren
         if all_documents:
             logger.info(f"Starte Ingestion von {len(all_documents)} Dokumenten...")
-            
-            # Wir nutzen einen Splitter, um sicherzugehen, dass riesige Metadaten nicht crashen
             splitter = SentenceSplitter(chunk_size=Settings.chunk_size, chunk_overlap=50)
             
             VectorStoreIndex.from_documents(
@@ -252,9 +286,5 @@ class RichLlamaIngestor:
             logger.warning("Keine Dokumente gefunden.")
 
 if __name__ == "__main__":
-    # Löschen des alten Index für sauberen Start (Optional)
-    # import requests
-    # requests.delete(f"http://localhost:9200/{INDEX_NAME}")
-    
     ingestor = RichLlamaIngestor()
     ingestor.run()

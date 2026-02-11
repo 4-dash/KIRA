@@ -12,6 +12,7 @@ dependencies = [
     "fastmcp>=2.14.4",
     "httpx==0.28.1",
     "llama-index>=0.14.13",
+    "llama-index-embeddings-azure-openai>=0.4.1",
     "llama-index-embeddings-huggingface>=0.6.1",
     "llama-index-vector-stores-opensearch>=1.0.0",
     "lxml>=6.0.2",
@@ -22,6 +23,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",
     "sentence-transformers>=5.2.2",
+    "shapely>=2.1.2",
     "uvicorn[standard]==0.40.0",
 ]
 
