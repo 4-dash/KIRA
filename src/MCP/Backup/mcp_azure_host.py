@@ -3,6 +3,8 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
+from datetime import datetime
+import locale
 
 # OpenAI & MCP Bibliotheken
 from openai import AzureOpenAI
@@ -27,6 +29,10 @@ client = AzureOpenAI(
     api_key=AZURE_API_KEY,
     api_version=API_VERSION
 )
+try:
+    locale.setlocale(locale.LC_TIME, 'de_DE.UTF-8')
+except:
+    pass
 
 # 2. MCP SERVER KONFIGURATION
 # Wir nutzen sys.executable, um sicherzustellen, dass wir dieselbe stabile Python-Version nutzen
@@ -61,6 +67,19 @@ async def run_chat_loop():
             print(f" Verbunden! {len(openai_tools)} Tools geladen.")
             print("Du kannst jetzt mit deinem Agenten chatten. (Schreibe 'exit' zum Beenden)")
 
+            today_str = datetime.now().strftime("%A, %d.%m.%Y")
+
+            system_instruction = f"""
+    Du bist KIRA, ein intelligenter Reiseassistent für das Allgäu.
+    
+    WICHTIGE INFORMATION:
+    - Heute ist: {today_str}.
+    - Wenn der Nutzer sagt "morgen", "übermorgen" oder "nächsten Freitag", 
+      rechne das Datum basierend auf dem heutigen Tag aus und nutze das Format YYYY-MM-DD für die Tools.
+    
+    Verhalte dich hilfreich und präzise.
+    """
+
             # C. CHAT LOOP
             messages = [
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent, der Zugang zu speziellen Tools hat via MCP."}
@@ -77,58 +96,62 @@ async def run_chat_loop():
                 
                 messages.append({"role": "user", "content": user_input})
 
-                # 1. Anfrage an GPT-4o
-                response = client.chat.completions.create(
-                    model=DEPLOYMENT_NAME,
-                    messages=messages,
-                    tools=openai_tools if openai_tools else None,
-                    tool_choice="auto"
-                )
-                
-                response_msg = response.choices[0].message
-                
-                # 2. Prüfen, ob GPT ein Tool nutzen will
-                if response_msg.tool_calls:
-                    messages.append(response_msg) # Verlauf speichern
-                    
-                    for tool_call in response_msg.tool_calls:
-                        func_name = tool_call.function.name
-                        func_args = tool_call.function.arguments
-                        
-                        print(f" Agent nutzt Tool: {func_name} ...")
-                        
-                        # 3. Tool auf dem MCP Server ausführen
-                        try:
-                            result = await session.call_tool(
-                                func_name,
-                                arguments=json.loads(func_args)
-                            )
-                            tool_output = str(result.content)
-                        except Exception as e:
-                            tool_output = f"Error executing tool: {str(e)}"
-
-                        # 4. Ergebnis an GPT zurücksenden
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": tool_output
-                        })
-                    
-                    # 5. Finale Antwort generieren (mit dem Wissen aus dem Tool)
-                    final_response = client.chat.completions.create(
+               # --- START CHANGE: Loop for handling Retries/Multi-step tools ---
+                while True:
+                    # 1. Ask GPT-4o
+                    response = client.chat.completions.create(
                         model=DEPLOYMENT_NAME,
                         messages=messages,
-                        tools=openai_tools
+                        tools=openai_tools if openai_tools else None,
+                        tool_choice="auto"
                     )
-                    ai_text = final_response.choices[0].message.content
-                    print(f"KIRA: {ai_text}")
-                    messages.append(final_response.choices[0].message)
-                
-                else:
-                    # Keine Tool-Nutzung, einfache Antwort
-                    print(f"KIRA: {response_msg.content}")
-                    messages.append(response_msg)
+                    
+                    response_msg = response.choices[0].message
+                    messages.append(response_msg) # Always save the AI response immediately
+                    
+                    # 2. Check if GPT wants to use a tool
+                    if response_msg.tool_calls:
+                        for tool_call in response_msg.tool_calls:
+                            func_name = tool_call.function.name
+                            func_args = tool_call.function.arguments
+                            
+                            print(f" ⚙️ Agent nutzt Tool: {func_name} ...")
+                            
+                            # 3. Execute Tool
+                            try:
+                                result = await session.call_tool(
+                                    func_name,
+                                    arguments=json.loads(func_args)
+                                )
+                                # Clean up the output format
+                                tool_output = ""
+                                if result.content:
+                                    for item in result.content:
+                                        if hasattr(item, 'text'):
+                                            tool_output += item.text
+                                        else:
+                                            tool_output += str(item)
+                                else:
+                                    tool_output = "Success"
+                            except Exception as e:
+                                tool_output = f"Error executing tool: {str(e)}"
 
+                            # 4. Send Result back to GPT
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_output
+                            })
+                        
+                        # IMPORTANT: No 'break' here! 
+                        # The loop continues so GPT can read the result and decide 
+                        # if it needs to retry (fix the error) or answer you.
+                    
+                    else:
+                        # No tools used? Then this is the final answer.
+                        print(f"KIRA: {response_msg.content}")
+                        break # Break inner loop, wait for next user input
+                # --- END CHANGE ---
 if __name__ == "__main__":
     try:
         asyncio.run(run_chat_loop())
