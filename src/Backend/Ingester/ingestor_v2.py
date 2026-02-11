@@ -7,6 +7,9 @@ from typing import Dict, Any, List
 from bs4 import BeautifulSoup
 from opensearchpy import OpenSearch, RequestsHttpConnection
 
+from shapely import wkt
+from shapely.geometry import mapping as shape_mapping
+
 # LlamaIndex Imports
 from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
 from llama_index.core.node_parser import SentenceSplitter
@@ -18,7 +21,7 @@ OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
-INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v9")
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v-working")
 
 DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
@@ -81,7 +84,6 @@ def derive_type_from_filename(filename: str) -> str:
 
 class RichLlamaIngestor:
     def __init__(self):
-        # 1. Low-Level Client
         self.os_client = OpenSearch(
             hosts=[{'host': OPENSEARCH_HOST, 'port': OPENSEARCH_PORT}],
             http_auth=OPENSEARCH_AUTH,
@@ -91,70 +93,48 @@ class RichLlamaIngestor:
         )
 
     def create_index_if_not_exists(self):
-        """
-        Erstellt den Index manuell mit FAISS und expliziten Mappings 
-        für Geometrie-Typen und technische Metadaten.
-        """
+        """Erstellt den Index manuell mit FAISS und GEO-Support."""
         index_body = {
             "settings": {
                 "index": {
-                    "knn": True,
-                    "refresh_interval": "1s"
+                    "knn": True
                 }
             },
             "mappings": {
                 "properties": {
-                    # LlamaIndex Standard Content Feld
-                    "description": {"type": "text"}, 
-                    
-                    # Vektor-Feld für die semantische Suche
+                    "description": {"type": "text"},
                     "embedding": {
                         "type": "knn_vector",
                         "dimension": EMBED_DIM,
                         "method": {
                             "name": "hnsw",
-                            "engine": "faiss",
-                            "space_type": "l2"
+                            "engine": "faiss"
                         }
                     },
-                    
-                    # --- GEOMETRIE ---
-                    "location": {"type": "geo_point"},
-                    "geo_line": {"type": "geo_shape"},
-                    
-                    # --- FILTERBARE METADATEN ---
                     "source_id": {"type": "keyword"},
-                    "type": {"type": "keyword"},
                     "city": {"type": "keyword"},
+                    "type": {"type": "keyword"},
                     "postal_code": {"type": "keyword"},
-                    "slug": {"type": "keyword"},
                     
-                    # --- TOUR STATISTIKEN ---
-                    "ascent": {"type": "integer"},
-                    "descent": {"type": "integer"},
-                    "length_m": {"type": "integer"},
-                    "duration_min": {"type": "integer"},
-                    "max_altitude": {"type": "integer"},
+                    # --- GEO MAPPINGS ---
+                    "location": {"type": "geo_point"},
                     
-                    # --- LODGING / UNTERKUNFT ---
-                    "beds": {"type": "integer"},
-                    "price_range": {"type": "keyword"},
-                    
-                    # --- EVENTS ---
-                    "startDate": {"type": "date"},
-                    "endDate": {"type": "date"}
+                    # NEW: Geo-Shape Mapping
+                    # ignore_z_value=True ensures the "881.0" elevation data doesn't crash the index
+                    "geo_line": {
+                        "type": "geo_shape",
+                        "ignore_z_value": True 
+                    }
+                    # --------------------
                 }
             }
         }
 
         if not self.os_client.indices.exists(index=INDEX_NAME):
-            try:
-                self.os_client.indices.create(index=INDEX_NAME, body=index_body)
-                logger.info(f"Index '{INDEX_NAME}' mit Geo-Mappings erfolgreich erstellt.")
-            except Exception as e:
-                logger.error(f"Fehler beim Erstellen des Index: {e}")
+            self.os_client.indices.create(index=INDEX_NAME, body=index_body)
+            logger.info(f"Index '{INDEX_NAME}' erstellt.")
         else:
-            logger.info(f"Index '{INDEX_NAME}' existiert bereits. Überspringe Erstellung.")
+            logger.info(f"Index '{INDEX_NAME}' existiert bereits.")
 
     def parse_to_document(self, raw_doc: Dict, filename: str) -> Document:
         # 1. Text Content
@@ -164,59 +144,68 @@ class RichLlamaIngestor:
         # 2. Metadaten Extrahieren
         metadata = {}
         
-        # Basis & IDs
-        metadata['source_id'] = raw_doc.get('id') or raw_doc.get('@id')
+        metadata['source_id'] = raw_doc.get('@id')
         metadata['name'] = raw_doc.get('name', 'Unbekannt')
         metadata['type'] = derive_type_from_filename(filename)
-        metadata['slug'] = raw_doc.get('slug')
-        metadata['copyright'] = raw_doc.get('copyrightNotice')
-
-        # --- ADDRESS ---
+        
         address = raw_doc.get('address', {})
-        if isinstance(address, dict):
+        if address:
             metadata['street'] = address.get('streetAddress', '')
             metadata['postal_code'] = address.get('postalCode', '')
             metadata['city'] = address.get('addressLocality', '')
             metadata['country'] = address.get('addressCountry', '')
+        
+        metadata['website'] = raw_doc.get('url')
+        metadata['telephone'] = raw_doc.get('telephone')
 
-        # --- GEO & LINE ---
-        geo = raw_doc.get('geo', {})
-        if isinstance(geo, dict):
-            if geo.get('type') == 'GeoCoordinates':
-                lat = safe_float(geo.get('latitude'))
-                lon = safe_float(geo.get('longitude'))
-                if lat is not None and lon is not None:
-                    metadata['location'] = f"{lat},{lon}"
-            
-            elif geo.get('type') == 'GeoShape':
-                metadata['geo_line'] = geo.get('line')
-                metadata['geo_id'] = geo.get('id')
-
-        loc_field = raw_doc.get('location')
-        if isinstance(loc_field, str) and "POINT" in loc_field:
-            try:
-                coords = loc_field.replace("POINT (", "").replace(")", "").split()
-                if len(coords) >= 2:
-                    metadata['location'] = f"{coords[1]},{coords[0]}"
-            except: pass
-
-        # --- TOUR SPECIFICS ---
-        metadata['ascent'] = raw_doc.get('dc:ascent')
-        metadata['descent'] = raw_doc.get('dc:descent')
-        metadata['min_altitude'] = raw_doc.get('dc:minAltitude')
-        metadata['max_altitude'] = raw_doc.get('dc:maxAltitude')
-        metadata['length_m'] = raw_doc.get('dc:length')
-        metadata['duration_min'] = raw_doc.get('dc:duration')
-
-        # --- ACCOMMODATION & EVENTS ---
-        metadata['beds'] = raw_doc.get('dc:totalNumberOfBeds')
-        metadata['price_range'] = raw_doc.get('priceRange')
-        metadata['startDate'] = raw_doc.get('startDate')
-        metadata['endDate'] = raw_doc.get('endDate')
-
-        # Fallback Text
         if not text_content:
-            text_content = f"{metadata['name']} ({metadata['type']}) in {metadata.get('city', 'Bayern')}."
+            text_content = f"{metadata['type']} namens {metadata['name']} in {metadata.get('city', 'Bayern')}."
+
+        if raw_doc.get('startDate'): metadata['startDate'] = raw_doc.get('startDate')
+        if raw_doc.get('endDate'): metadata['endDate'] = raw_doc.get('endDate')
+        
+        # --- GEO POINT (Standard logic) ---
+        geo = raw_doc.get('geo', {})
+        lat = safe_float(geo.get('latitude'))
+        lon = safe_float(geo.get('longitude'))
+        
+        # Default assignment (can be overwritten below)
+        if lat is not None and lon is not None:
+            metadata['location'] = f"{lat},{lon}"
+
+        # --- NEW: GEO LINE (Shape & Start Point Overwrite) ---
+        wkt_string = geo.get('line')
+        
+        if wkt_string:
+            try:
+                # 1. Clean & Parse WKT
+                clean_wkt = wkt_string.replace("MULTILINESTRING Z", "MULTILINESTRING")
+                shape_obj = wkt.loads(clean_wkt)
+                
+                # 2. Convert to GeoJSON for the 'geo_line' field
+                geojson = shape_mapping(shape_obj)
+                metadata['geo_line'] = geojson
+
+                # 3. OVERWRITE LOCATION with Start Point
+                # Handle both LineString and MultiLineString
+                first_geom = shape_obj.geoms[0] if hasattr(shape_obj, 'geoms') else shape_obj
+                
+                if first_geom.coords:
+                    # coords[0] gives (lon, lat, z) or (lon, lat)
+                    start_point = first_geom.coords[0]
+                    start_lon = start_point[0]
+                    start_lat = start_point[1]
+                    
+                    # Overwrite metadata location with "lat,lon"
+                    metadata['location'] = f"{start_lat},{start_lon}"
+                
+            except Exception as e:
+                logger.warning(f"Could not parse geo line/start point for {metadata['name']}: {e}")
+        # -----------------------------------------------------
+
+        ohs = raw_doc.get('openingHoursSpecification')
+        if ohs:
+            metadata['openingHoursSpecification'] = str(ohs)[:1000] 
 
         # 3. Document erstellen
         doc = Document(
@@ -224,11 +213,18 @@ class RichLlamaIngestor:
             metadata=metadata,
             id_=metadata['source_id'] or None,
             excluded_embed_metadata_keys=[
-                'source_id', 'geo_line', 'geo_id', 'slug', 'copyright',
-                'ascent', 'descent', 'min_altitude', 'max_altitude', 
-                'length_m', 'duration_min', 'beds'
+                'source_id', 
+                'website', 
+                'telephone',
+                'geo_line', 
+                'location'
             ],
-            excluded_llm_metadata_keys=['source_id']
+            
+            excluded_llm_metadata_keys=[
+                'source_id',
+                'geo_line', 
+                'location'
+            ]
         )
         
         return doc
