@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 from openai import AzureOpenAI
 
-from .mcp_tools import (
+from mcp_tools import (
     find_best_city_logic,
     plan_activities_logic,
     plan_complete_trip_logic,
