@@ -275,19 +275,58 @@ export default function App() {
 
   // 1. WebSocket Verbindung herstellen
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/chat'); // ODER ws://192.168.0.70:8000/chat falls Localhost nicht geht
+    // Erkennt automatisch ob localhost oder eine IP genutzt wird
+    const host = window.location.hostname || "localhost";
+    const ws = new WebSocket(`ws://${host}:8000/chat`);
 
-    ws.onopen = () => console.log('✅ Connected to KIRA Backend');
-    ws.onmessage = (event) => {
-      const aiText = event.data;
-      setIsLoading(false);
-      setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: aiText }]);
+    ws.onopen = () => {
+      console.log('✅ Connected to KIRA Backend');
     };
+
+    ws.onmessage = (event) => {
+      setIsLoading(false);
+      const rawData = event.data;
+
+      try {
+        const parsed = JSON.parse(rawData);
+
+        // Fall A: Es ist eine normale Text-Nachricht von der KI
+        if (parsed.type === "assistant_message") {
+          setMessages(prev => [
+            ...prev, 
+            { id: Date.now(), sender: 'ai', text: parsed.content }
+          ]);
+        } 
+        // Fall B: Es ist ein Tool-Ergebnis (Reiseplan, Karte, JSON-Daten)
+        else {
+          // Wir speichern das rohe JSON als Text, damit deine 
+          // ChatMessage-Komponente (mit tripData/activityData) es rendern kann
+          setMessages(prev => [
+            ...prev, 
+            { id: Date.now(), sender: 'ai', text: rawData }
+          ]);
+        }
+      } catch (e) {
+        // Fallback: Falls die Nachricht kein JSON ist, einfach als Text anzeigen
+        setMessages(prev => [
+          ...prev, 
+          { id: Date.now(), sender: 'ai', text: rawData }
+        ]);
+      }
+    };
+
     ws.onerror = (e) => {
-        console.error('❌ WebSocket Error:', e);
-        setIsLoading(false);
-    }
+      console.error('❌ WebSocket Error:', e);
+      setIsLoading(false);
+    };
+
+    ws.onclose = () => {
+      console.log('ℹ️ WebSocket connection closed');
+    };
+
     setSocket(ws);
+
+    // Cleanup beim Schließen der Komponente
     return () => ws.close();
   }, []);
 
