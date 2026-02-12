@@ -122,6 +122,8 @@ Regeln:
 """
 
 
+
+
 async def handle_chat_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
 
@@ -135,7 +137,6 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
             user_text = await websocket.receive_text()
             messages.append({"role": "user", "content": user_text})
 
-            # Tool loop: allow the model to call tools up to N times
             for _ in range(6):
                 resp = client.chat.completions.create(
                     model=deployment,
@@ -147,23 +148,24 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                 choice = resp.choices[0]
                 msg = choice.message
 
-                # If the model replied normally (no tools), send to frontend as-is
                 if not msg.tool_calls:
                     if msg.content:
+                        # FIX 1: ensure_ascii=False sorgt für lesbare Umlaute/Emojis
+                        # Wir schicken hier ein JSON, das das Frontend parsen muss
                         await websocket.send_text(
-                            json.dumps({"type": "assistant_message", "content": msg.content})
+                            json.dumps({
+                                "type": "assistant_message",
+                                "content": msg.content
+                            }, ensure_ascii=False)
                         )
                         messages.append({"role": "assistant", "content": msg.content})
                     break
 
-                # Otherwise: execute tool calls
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.content or "",
-                        "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
-                    }
-                )
+                messages.append({
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [tc.model_dump() for tc in msg.tool_calls],
+                })
 
                 for tc in msg.tool_calls:
                     tool_name = tc.function.name
@@ -181,17 +183,11 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                             date=args.get("date"),
                             time=args.get("time"),
                         )
-
-                        # Stream to frontend immediately
-                        await websocket.send_text(result)
-
                     elif tool_name == "plan_activities":
                         result = plan_activities_logic(
                             location=args.get("location", ""),
                             interest=args.get("interest", ""),
                         )
-                        await websocket.send_text(result)
-
                     elif tool_name == "plan_multiday_trip":
                         result = plan_multiday_trip_logic(
                             start=args.get("start", ""),
@@ -199,8 +195,6 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                             days=int(args.get("days", 4) or 4),
                             interest=args.get("interest", ""),
                         )
-                        await websocket.send_text(result)
-
                     elif tool_name == "plan_complete_trip":
                         result = plan_complete_trip_logic(
                             start=args.get("start", ""),
@@ -208,27 +202,21 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                             interest=args.get("interest", ""),
                             num_stops=int(args.get("num_stops", 2) or 2),
                         )
-                        await websocket.send_text(result)
-
                     elif tool_name == "find_best_city":
-                        # Internal step: do NOT stream to frontend
                         result = find_best_city_logic(query=args.get("query", ""))
                     else:
-                        result = json.dumps(
-                            {"type": "error", "message": f"Unknown tool: {tool_name}"}
-                        )
+                        result = json.dumps({"type": "error", "message": f"Unknown tool: {tool_name}"})
 
-                    # Always feed tool result back to the model
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "name": tool_name,
-                            "content": result,
-                        }
-                    )
+                    # FIX 2: Auch bei Tool-Resultaten (die JSON sind) sicherstellen, dass sie
+                    # ans Frontend gesendet werden, falls es kein interner Step ist.
+                    if tool_name != "find_best_city":
+                         await websocket.send_text(result)
 
-            # end tool loop
-
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": tool_name,
+                        "content": result,
+                    })
     except WebSocketDisconnect:
         return
