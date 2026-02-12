@@ -17,6 +17,7 @@ query PlanTrip(
     transportModes: [{mode: TRANSIT}, {mode: WALK}]
   ) {
     itineraries {
+      duration  # <--- ADDED: Required for calculating total trip time
       legs {
         mode
         startTime
