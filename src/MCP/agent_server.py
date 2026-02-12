@@ -16,13 +16,14 @@ from opensearchpy import OpenSearch, RequestsHttpConnection
 import json
 import random
 from collections import Counter
+from math import radians, cos, sin, asin, sqrt
 # 1. KONFIGURATION LADEN
 load_dotenv()
 
 # --- DEINE ORIGINALE KONFIGURATION (UNVERÄNDERT) ---
 OTP_URL = "http://localhost:8080/otp/routers/default/index/graphql"
 OPENSEARCH_HOST = {'host': 'localhost', 'port': 9200}
-INDEX_NAME = "travel-plans"
+INDEX_NAME = "tourism-data-v6"
 # ---------------------------------------------------
 def log(msg):
     sys.stderr.write(f"[LOG] {msg}\n")
@@ -54,16 +55,15 @@ OPENSEARCH_PORT = 9200
 INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v6")
 
 # --- ACTIVITY ENGINE SETUP ---
-activity_engine = None
+activity_retriever = None 
 
 try:
-    # 1. Embedding Modell laden (Muss identisch zum Ingester auf der VM sein!)
-    # sys.stderr.write hilft beim Debuggen, ohne den MCP-Stream zu stören
+    # 1. Embedding Modell laden
     sys.stderr.write("[SERVER] Lade Embedding Modell...\n")
     Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    Settings.llm = None # Wir brauchen hier kein LLM, nur die Suche
+    Settings.llm = None 
 
-    # 2. Verbindung zur VM-Datenbank (via Tunnel)
+    # 2. Verbindung zur VM-Datenbank
     sys.stderr.write(f"[SERVER] Verbinde zu OpenSearch Index '{INDEX_NAME}'...\n")
     os_client = OpenSearch(
         hosts=[{'host': OPENSEARCH_HOST, 'port': OPENSEARCH_PORT}],
@@ -81,17 +81,31 @@ try:
     )
     
     vector_store = OpensearchVectorStore(client_wrapper)
-    activity_index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
     
-    # 4. Engine erstellen (Sucht die Top 5 Ergebnisse)
-    activity_engine = activity_index.as_query_engine(similarity_top_k=5)
-    sys.stderr.write("[SERVER] ✅ Activities Datenbank erfolgreich verbunden.\n")
+    # 4. Index & RETRIEVER erstellen
+    # WICHTIG: .as_retriever() verhindert den Context-Size Fehler!
+    # Es holt nur Daten, ohne sie durch ein LLM zu jagen.
+    activity_index = VectorStoreIndex.from_vector_store(vector_store=vector_store)
+    activity_retriever = activity_index.as_retriever(similarity_top_k=500)
+    
+    sys.stderr.write("[SERVER] ✅ Activities Datenbank erfolgreich verbunden (Retriever Mode).\n")
 
 except Exception as e:
     sys.stderr.write(f"[SERVER] ⚠️ ACHTUNG: Konnte Activity-Datenbank nicht laden: {e}\n")
-    # Wir lassen den Server trotzdem starten, damit andere Tools funktionieren
 
-# --- HILFSFUNKTIONEN ---
+def calculate_distance(lat1, lon1, lat2, lon2):
+    """
+    Berechnet die Entfernung zwischen zwei Punkten in km (Haversine-Formel).
+    """
+    if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+        return 99999.0 # Unendlich weit weg
+        
+    R = 6371 # Erdradius in km
+    dLat = radians(lat2 - lat1)
+    dLon = radians(lon2 - lon1)
+    a = sin(dLat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dLon/2)**2
+    c = 2 * asin(sqrt(a))
+    return R * c
 
 def get_coords(target_name: str):
     """
@@ -115,10 +129,7 @@ def get_coords(target_name: str):
     return None, None
 
 def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
-    """
-    Nutzt deine GraphQL URL für die Abfrage.
-    """
-    # Standard OTP v2 GraphQL Query
+    # UPDATE: Wir fragen jetzt auch 'intermediateStops' ab!
     query = """
     query PlanTrip($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!, $date: String!, $time: String!) {
       plan(
@@ -137,9 +148,11 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
             startTime
             endTime
             duration
+            legGeometry { points }
             route { shortName longName }
-            from { name }
-            to { name }
+            from { name lat lon }
+            to { name lat lon }
+            intermediateStops { name lat lon }  # <--- NEU: Alle Haltestellen dazwischen!
           }
         }
       }
@@ -154,25 +167,14 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
     }
     
     try:
-        log(f"Sende GraphQL an: {OTP_URL}")
-        # Wir nutzen requests.post für GraphQL
         response = requests.post(OTP_URL, json={"query": query, "variables": variables}, timeout=60)
         return response.json()
     except Exception as e:
-        log(f"OTP GraphQL Fehler: {e}")
+        sys.stderr.write(f"[ERROR] OTP Anfrage fehlgeschlagen: {e}\n")
         return {"error": str(e)}
 
-# --- DAS TOOL FÜR DEN AGENTEN ---
-
-
-
-def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
-    """
-    Die eigentliche Logik, ohne @mcp.tool Dekorator.
-    Kann von api.py direkt aufgerufen werden.
-    """
-    sys.stderr.write(f"[LOGIC] Suche Route {start} -> {end} ({time_str})\n")
-
+def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30", 
+                       start_coords_override=None, end_coords_override=None) -> str:
     # 1. Datum parsen
     try:
         trip_time = datetime.now()
@@ -187,12 +189,16 @@ def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30") -
     except:
         return json.dumps({"error": "Datumsfehler"})
 
-    # 2. Koordinaten holen (Du musst sicherstellen, dass get_coords hier verfügbar ist)
-    # (Falls get_coords nicht definiert ist, füge es oben wieder ein oder importiere es)
-    from agent_server import get_coords, query_otp_api # Self-import trick oder Funktionen nach oben schieben
-    
-    start_lat, start_lon = get_coords(start)
-    end_lat, end_lon = get_coords(end)
+    # 2. Koordinaten bestimmen (Entweder Override nutzen oder suchen)
+    if start_coords_override:
+        start_lat, start_lon = start_coords_override
+    else:
+        start_lat, start_lon = get_coords(start)
+
+    if end_coords_override:
+        end_lat, end_lon = end_coords_override
+    else:
+        end_lat, end_lon = get_coords(end)
 
     if not start_lat or not end_lat:
         return json.dumps({"error": f"Koordinaten nicht gefunden für {start} oder {end}"})
@@ -221,64 +227,137 @@ def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30") -
             if leg.get('route'):
                 line_name = leg['route'].get('shortName') or leg['route'].get('longName') or ""
 
-            from_name = leg['from']['name']
-            to_name = leg['to']['name']
+            # Start & Ziel
+            from_node = leg['from']
+            to_node = leg['to']
+            from_name = from_node['name']
+            to_name = to_node['name']
+            from_coords = [from_node['lat'], from_node['lon']]
+            to_coords = [to_node['lat'], to_node['lon']]
 
-            # Wenn OTP "Origin" sagt, nehmen wir den Start-Namen vom User (z.B. "Fischen")
-            if from_name == "Origin":
-                from_name = start
+            if from_name == "Origin": from_name = start
+            if to_name == "Destination": to_name = end
             
-            # Wenn OTP "Destination" sagt, nehmen wir den Ziel-Namen (z.B. "Sonthofen")
-            if to_name == "Destination":
-                to_name = end
-            
+            # Geometrie
+            geometry = ""
+            if leg.get('legGeometry'): geometry = leg['legGeometry'].get('points', "")
+
             frontend_data["legs"].append({
                 "mode": mode,
                 "from": from_name,
                 "to": to_name,
+                "from_coords": from_coords,
+                "to_coords": to_coords,
+                "stops": [], 
                 "start_time": start_t,
                 "end_time": end_t,
                 "line": line_name,
-                "duration": int(leg['duration'] / 60)
+                "duration": int(leg['duration'] / 60),
+                "geometry": geometry 
             })
 
         return json.dumps(frontend_data)
     else:
         return json.dumps({"error": "Keine Verbindung gefunden"})
-
+    
 def plan_activities_logic(location: str, interest: str = "") -> str:
-    """
-    Sucht Aktivitäten und gibt sie als JSON-Liste zurück (für Frontend-Karten).
-    """
-    if not activity_engine:
+    if not activity_retriever:
         return json.dumps({"error": "Datenbank nicht verbunden."})
     
-    query = f"{interest} in {location}" if interest else f"Highlights in {location}"
-    sys.stderr.write(f"[LOGIC] Suche Activities: {query}\n")
+    center_lat, center_lon = get_coords(location)
+    if not center_lat:
+        return json.dumps({"type": "activity_list", "location": location, "items": []})
+
+    search_query = f"{interest} in {location}" if interest else f"Highlights in {location}"
+    
+    # --- DYNAMISCHE KONFIGURATION ---
+    # Standard: Weiter Radius für Natur/Wandern (15 km)
+    max_radius = 15.0 
+    required_keywords = []
+    
+    lower_interest = interest.lower()
+    
+    # SPEZIAL-REGELN FÜR STADT-AKTIVITÄTEN
+    if "museum" in lower_interest:
+        search_query = f"Museum Ausstellung Geschichte Kultur in {location}"
+        required_keywords = ["museum", "galerie", "ausstellung", "heimathaus", "sammlung"]
+        max_radius = 3.0 # Museen müssen zentral sein
+        
+    elif "food" in lower_interest or "essen" in lower_interest or "restaurant" in lower_interest:
+         search_query = f"Restaurant Gasthof Essen Traditionelle Küche in {location}"
+         required_keywords = ["restaurant", "gasthof", "gaststätte", "bräu", "stube", "wirtshaus", "pizzeria"]
+         max_radius = 3.0 # Zum Essen will man nicht weit fahren
 
     try:
-        # 1. Anfrage an LlamaIndex
-        response = activity_engine.query(query)
+        sys.stderr.write(f"[LOGIC] Suche Activities: '{search_query}' (Radius {max_radius}km)\n")
+        nodes = activity_retriever.retrieve(search_query)
         
-        # 2. Daten aus den "Source Nodes" extrahieren
-        # (Das sind die echten DB-Einträge, die gefunden wurden)
         activities_list = []
         
-        for node_with_score in response.source_nodes:
+        for node_with_score in nodes:
             node = node_with_score.node
             meta = node.metadata
+            name = meta.get("name", "Unbekannt")
+            lower_name = name.lower()
+            raw_category = str(meta.get("category", "")).lower()
             
-            # Wir bauen ein sauberes Objekt für das Frontend
-            activity_item = {
-                "name": meta.get("name", "Unbekannter Ort"),
-                "category": meta.get("category", "Sehenswürdigkeit"),
-                "city": meta.get("city", location),
-                "description": node.get_text()[:150] + "...", # Kurze Vorschau
-                # Falls du Bild-URLs in den Daten hast: meta.get("image_url")
-            }
-            activities_list.append(activity_item)
+            # --- 🛡️ TÜRSTEHER (Nur aktiv wenn Keywords gesetzt) ---
+            if required_keywords:
+                match_found = False
+                for kw in required_keywords:
+                    if kw in lower_name or kw in raw_category:
+                        match_found = True
+                        break
+                if not match_found: continue
+            # ------------------------------------------------------
 
-        # 3. Als JSON zurückgeben (mit Typ-Marker "activity_list")
+            # Koordinaten Parsing
+            lat = None
+            lon = None
+            if "lat" in meta: lat = meta["lat"]
+            elif "latitude" in meta: lat = meta["latitude"]
+            if "lon" in meta: lon = meta["lon"]
+            elif "longitude" in meta: lon = meta["longitude"]
+
+            if (lat is None or lon is None) and "location" in meta:
+                loc_data = meta["location"]
+                if isinstance(loc_data, str) and "," in loc_data:
+                    try:
+                        parts = loc_data.split(",")
+                        lat = float(parts[0].strip())
+                        lon = float(parts[1].strip())
+                    except: pass
+                elif isinstance(loc_data, dict):
+                    lat = loc_data.get("lat") or loc_data.get("latitude")
+                    lon = loc_data.get("lon") or loc_data.get("longitude")
+
+            if lat is None or lon is None: continue 
+            lat = float(lat)
+            lon = float(lon)
+
+            # --- DYNAMISCHER RADIUS CHECK ---
+            dist = calculate_distance(center_lat, center_lon, lat, lon)
+            if dist > max_radius: continue
+
+            # Kategorie Display
+            cat_display = meta.get("type", "Attraction")
+            if "museum" in lower_name or "heimathaus" in lower_name: cat_display = "Museum"
+            elif "gasthof" in lower_name or "restaurant" in lower_name: cat_display = "Restaurant"
+
+            activity_item = {
+                "name": name,
+                "category": cat_display,
+                "city": meta.get("city", location),
+                "description": node.get_text()[:150] + "...",
+                "lat": lat,
+                "lon": lon,
+                "source": meta.get("source", "unknown")
+            }
+            
+            if any(a['name'] == activity_item['name'] for a in activities_list): continue
+            activities_list.append(activity_item)
+            if len(activities_list) >= 5: break
+        
         result = {
             "type": "activity_list",
             "location": location,
@@ -287,60 +366,94 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
         return json.dumps(result)
 
     except Exception as e:
-        sys.stderr.write(f"[ERROR] {e}\n")
+        sys.stderr.write(f"[ERROR] DB-Fehler in plan_activities: {e}\n")
         return json.dumps({"error": str(e)})
     
 def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int = 2) -> str:
-    """
-    Plant eine komplette Route: Start -> Aktivität 1 -> Aktivität 2 -> Ziel.
-    Gibt ein spezielles 'multi_step_plan' JSON zurück.
-    """
-    sys.stderr.write(f"[LOGIC] Plane kompletten Trip: {start} -> {interest} -> {end}\n")
+    sys.stderr.write(f"[LOGIC] Plane Rundreise: {start} -> {end} ({interest}) -> {start}\n")
     
-    # 1. Aktivitäten finden (Nutze deine existierende Activity-Engine)
-    # Wir suchen Aktivitäten am Zielort (oder am Startort, je nach Logik. Hier: Zielort).
-    activities_json = plan_activities_logic(location=end, interest=interest)
-    activities_data = json.loads(activities_json)
-    
-    if "error" in activities_data or not activities_data.get("items"):
-        return json.dumps({"error": "Keine passenden Aktivitäten gefunden."})
+    start_lat, start_lon = get_coords(start)
+    if not start_lat:
+         return json.dumps({"type": "error", "message": f"Startort {start} nicht gefunden."})
+    start_coords = (start_lat, start_lon)
 
-    # Wir nehmen die Top X Aktivitäten
-    stops = activities_data["items"][:num_stops]
+    # --- SCHRITT 1: INTERESSEN ANALYSE ---
+    interests_to_search = []
+    lower_int = interest.lower()
     
-    steps = []
-    current_location = start
+    # Prüfen auf die "Museum & Food" Kombi
+    wants_museum = "museum" in lower_int or "kultur" in lower_int
+    wants_food = "food" in lower_int or "essen" in lower_int or "restaurant" in lower_int
     
-    # 2. Schleife durch die Stopps und Routen berechnen
-    for stop in stops:
-        stop_name = stop["name"]
+    if wants_museum and wants_food:
+        # JA, das ist die Spezial-Kombi -> Split!
+        interests_to_search.append("Museum Geschichte Kultur")
+        interests_to_search.append("Gasthof Restaurant Essen")
+    else:
+        # NEIN, normale Suche (z.B. "Wandern", "Aussicht", "Action")
+        # Wir suchen einfach 2x nach dem Thema, um verschiedene Treffer zu kriegen
+        interests_to_search = [interest, interest]
+
+    # --- SCHRITT 2: AKTIVITÄTEN SAMMELN ---
+    stops = []
+    seen_names = set()
+    
+    for sub_interest in interests_to_search:
+        act_json = plan_activities_logic(location=end, interest=sub_interest)
+        act_data = json.loads(act_json)
         
-        # A. Route berechnen: Aktueller Ort -> Nächster Stopp
-        trip_json = plan_journey_logic(start=current_location, end=stop_name, time_str="tomorrow 09:00")
+        if "items" in act_data:
+            for item in act_data["items"]:
+                if item["name"] not in seen_names:
+                    stops.append(item)
+                    seen_names.add(item["name"])
+                    break # Top 1 pro Runde
+        
+        if len(stops) >= num_stops: break
+
+    intro_msg = f"Ich habe einen Ausflug von {start} nach {end} mit {len(stops)} Stopps geplant:"
+    if not stops:
+        intro_msg = f"Keine passenden Aktivitäten in {end} gefunden. Hier ist die reine Fahrt:"
+
+    # --- SCHRITT 3: ROUTING (Identisch wie zuvor) ---
+    steps = []
+    current_coords = start_coords
+    current_name = start
+    
+    for i, stop in enumerate(stops):
+        stop_name = stop["name"]
+        stop_coords = (stop["lat"], stop["lon"])
+        label = f"Fahrt zu: {stop['category']} ({stop_name})"
+        
+        trip_json = plan_journey_logic(
+            start=current_name, end=stop_name, time_str="tomorrow 09:00",
+            start_coords_override=current_coords, end_coords_override=stop_coords
+        )
         trip_data = json.loads(trip_json)
         
         if "legs" in trip_data:
-            steps.append({ "type": "trip", "data": trip_data })
+            steps.append({ "type": "trip", "data": trip_data, "label": label })
         else:
-            # Fallback falls keine Route gefunden
-            steps.append({ "type": "error", "message": f"Kein Weg gefunden von {current_location} nach {stop_name}" })
+            steps.append({ "type": "error", "message": f"Kein Weg nach {stop_name}" })
 
-        # B. Die Aktivität selbst anzeigen
         steps.append({ "type": "activity", "data": stop })
-        
-        # Neuer Startpunkt ist jetzt dieser Stopp
-        current_location = stop_name
+        current_coords = stop_coords
+        current_name = stop_name
 
-    # 3. Letzte Strecke: Letzter Stopp -> Endgültiges Ziel (z.B. Hotel in Sonthofen)
-    final_trip_json = plan_journey_logic(start=current_location, end=end, time_str="tomorrow 16:00")
+    final_trip_json = plan_journey_logic(
+        start=current_name, end=start, time_str="tomorrow 16:00",
+        start_coords_override=current_coords, end_coords_override=start_coords
+    )
     final_trip_data = json.loads(final_trip_json)
+    
     if "legs" in final_trip_data:
-         steps.append({ "type": "trip", "data": final_trip_data })
+         steps.append({ "type": "trip", "data": final_trip_data, "label": "Heimreise" })
+    else:
+         steps.append({ "type": "error", "message": "Keine Rückverbindung gefunden." })
 
-    # 4. Alles zusammenpacken
     result = {
         "type": "multi_step_plan",
-        "intro": f"Ich habe eine Route von {start} nach {end} mit {len(stops)} Stopps ({interest}) geplant:",
+        "intro": intro_msg,
         "steps": steps
     }
     
@@ -464,29 +577,25 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
     return json.dumps(result)
 
 def find_best_city_logic(query: str) -> str:
-    """
-    Sucht basierend auf Interessen (z.B. "Quad fahren") die beste Stadt im Index.
-    """
     # Fallback, falls DB nicht läuft
-    if not activity_engine:
+    if not activity_retriever:
         return "Oberstdorf" 
         
     sys.stderr.write(f"[LOGIC] Suche beste Stadt für: {query}\n")
     
-    # Wir suchen breit nach Aktivitäten
-    response = activity_engine.query(f"Best location for {query}")
+    # Retrieve statt Query
+    nodes = activity_retriever.retrieve(f"Best location for {query}")
     
     cities = []
-    # Wir zählen, welche Stadt in den Top-Treffern am häufigsten vorkommt
-    for node in response.source_nodes:
+    for node_with_score in nodes:
+        node = node_with_score.node
         city = node.metadata.get("city")
         if city:
             cities.append(city)
             
     if not cities:
-        return "Sonthofen" # Fallback Standard
+        return "Sonthofen"
         
-    # Die häufigste Stadt gewinnen lassen
     most_common = Counter(cities).most_common(1)
     best_city = most_common[0][0]
     

@@ -9,101 +9,65 @@ const INITIAL_MESSAGE = {
   text: "Guten Tag! Ich bin KIRA. Wohin möchtest du reisen?",
 };
 
-const FILTER_OPTIONS = {
-  types: [
-    { id: 'stay', label: 'Unterkunft', icon: MapPin },
-    { id: 'dining', label: 'Gastronomie', icon: MapPin },
-    { id: 'culture', label: 'Kultur', icon: MapPin },
-    { id: 'nature', label: 'Natur', icon: MapPin },
-  ],
-  priceRanges: [
-    { id: '$', label: 'Budget', icon: '$' },
-    { id: '$$', label: 'Mittel', icon: '$$' },
-    { id: '$$$', label: 'Premium', icon: '$$$' },
-  ],
-  ratings: [
-    { id: 4.5, label: '4,5+ Sterne', value: 4.5 },
-    { id: 4.0, label: '4,0+ Sterne', value: 4.0 },
-  ],
-};
-
 // --- Komponenten ---
 
 const ChatMessage = ({ msg }) => {
   const isAi = msg.sender === 'ai';
   
-  // States to hold the parsed data
   let tripData = null;
   let activityData = null; 
   let multiStepData = null;
   let displayText = msg.text;
 
-  // Logic to parse the AI response looking for JSON
   if (isAi && typeof msg.text === 'string') {
-    // Clean up potential Markdown formatting (```json ... ```)
     const cleanText = msg.text.replace(/```json/g, '').replace(/```/g, '').trim();
     
     if (cleanText.startsWith('{') || cleanText.startsWith('[')) {
         try {
           const parsed = JSON.parse(cleanText);
           
-          // Case 1: Single Trip Plan
           if (parsed.legs) { 
             tripData = parsed;
             displayText = "Ich habe folgende Verbindung gefunden:"; 
           }
-          // Case 2: List of Activities
           else if (parsed.type === 'activity_list') {
             activityData = parsed;
             displayText = "Hier sind meine Empfehlungen:";
           }
-          // Case 3: Complex Multi-Step Itinerary
           else if (parsed.type === 'multi_step_plan') {
              multiStepData = parsed;
              displayText = parsed.intro || "Hier ist dein Reiseplan:";
           }
+          // --- NEU: Fehler abfangen ---
+          else if (parsed.error) {
+             displayText = `⚠️ ${parsed.error}`;
+             // Optional: Style anpassen, damit es rot wirkt?
+             // Wir lassen es erstmal als Text, aber jetzt ohne Klammern und Anführungszeichen.
+          }
         } catch (e) { 
-          // If parsing fails, we just show the raw text
           console.error("JSON Parse Error", e);
         }
     }
   }
-
   return (
     <div className={`flex w-full mb-4 ${isAi ? 'justify-start' : 'justify-end'}`}>
       <div className={`flex max-w-[95%] md:max-w-[85%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
-        
-        {/* Avatar Bubble */}
         <div className={`shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 ${isAi ? 'bg-slate-200 text-slate-600' : 'bg-slate-300 text-slate-700'}`}>
           {isAi ? <Bot size={18} /> : <User size={18} />}
         </div>
         
         <div className="flex flex-col w-full">
-          {/* Main Text Bubble */}
           <div className={`p-3 rounded-2xl text-sm shadow-sm w-fit ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none'}`}>
             <p className="whitespace-pre-line">{displayText}</p>
           </div>
 
-          {/* RENDER: Single Trip Card */}
-          {tripData && (
-            <div className="mt-2 ml-1">
-              <TripCard data={tripData} />
-            </div>
-          )}
+          {tripData && <div className="mt-2 ml-1"><TripCard data={tripData} /></div>}
+          {activityData && <div className="mt-2 ml-1"><ActivityList data={activityData} /></div>}
 
-          {/* RENDER: Activity List */}
-          {activityData && (
-            <div className="mt-2 ml-1">
-              <ActivityList data={activityData} />
-            </div>
-          )}
-
-          {/* RENDER: Multi-Step Timeline (The new feature) */}
           {multiStepData && (
             <div className="mt-4 space-y-0 ml-1 border-l-2 border-slate-200 pl-4">
                 {multiStepData.steps.map((step, idx) => (
                     <div key={idx} className="relative">
-                      {/* --- NEU: TAG HEADER --- */}
                         {step.type === 'header' && (
                            <div className="mt-8 mb-4 first:mt-0">
                                <div className="absolute -left-[25px] mt-1.5 w-4 h-4 rounded-full bg-slate-800 border-2 border-white z-10"></div>
@@ -111,18 +75,15 @@ const ChatMessage = ({ msg }) => {
                            </div>
                         )}
                         
-                        {/* Timeline Dot (Color changes if it's an error) */}
                         <div className={`absolute -left-[21px] top-6 w-3 h-3 rounded-full border-2 border-white ${step.type === 'error' ? 'bg-red-300' : 'bg-slate-300'}`}></div>
                         
-                        {/* 1. Successful Trip Segment */}
                         {step.type === 'trip' && (
                             <div className="mb-4">
-                                <div className="text-xs font-bold text-slate-400 mb-1 uppercase tracking-wider">Fahrt</div>
+                                <div className="text-xs font-bold text-slate-400 mb-1 uppercase tracking-wider">{step.label || 'Fahrt'}</div>
                                 <TripCard data={step.data} />
                             </div>
                         )}
                         
-                        {/* 2. Activity Segment */}
                         {step.type === 'activity' && (
                             <div className="mb-6">
                                 <div className="text-xs font-bold text-indigo-400 mb-1 uppercase tracking-wider">Aktivität</div>
@@ -130,7 +91,6 @@ const ChatMessage = ({ msg }) => {
                             </div>
                         )}
 
-                        {/* 3. Error Segment (This fixes the missing trips!) */}
                         {step.type === 'error' && (
                             <div className="mb-6">
                                 <div className="text-xs font-bold text-red-400 mb-1 uppercase tracking-wider">Route nicht möglich</div>
@@ -138,27 +98,22 @@ const ChatMessage = ({ msg }) => {
                                     <AlertCircle size={18} className="shrink-0" />
                                     <div className="flex flex-col">
                                       <span className="text-xs font-medium">{step.message}</span>
-                                      <span className="text-[10px] opacity-75">Prüfe die Entfernung oder Fahrplandaten.</span>
                                     </div>
                                 </div>
                             </div>
                         )}
-
                     </div>
                 ))}
             </div>
           )}
-
         </div>
       </div>
     </div>
   );
 };
 
-
 const TripCard = ({ data }) => {
   if (!data || !data.legs) return null;
-
   return (
     <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden my-3">
       <div className="bg-slate-50 p-4 border-b border-slate-100 flex justify-between items-center">
@@ -215,9 +170,7 @@ const SinglePlaceCard = ({ place }) => (
     </div>
 );
 
-
-const FilterPanel = ({ isOpen, onClose, filters, setFilters }) => {
-    // Vereinfachte Filter-Komponente
+const FilterPanel = ({ isOpen, onClose }) => {
     if(!isOpen) return null;
     return (
         <div className="absolute top-0 left-0 w-full h-full bg-white z-50 p-4">
@@ -242,7 +195,6 @@ const ActivityList = ({ data }) => {
 
 const PlaceCard = ({ place }) => (
     <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex gap-4">
-        {/* Platzhalter Icon/Bild */}
         <div className="h-12 w-12 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center shrink-0">
             <MapPin size={20} />
         </div>
@@ -253,6 +205,39 @@ const PlaceCard = ({ place }) => (
         </div>
     </div>
 );
+
+// Hilfsfunktion: Decodiert Google Polyline Format
+function decodePolyline(encoded) {
+  if (!encoded) return [];
+  var poly = [];
+  var index = 0, len = encoded.length;
+  var lat = 0, lng = 0;
+
+  while (index < len) {
+    var b, shift = 0, result = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    var dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+    lat += dlat;
+
+    shift = 0;
+    result = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    var dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+    lng += dlng;
+
+    poly.push([lat / 1e5, lng / 1e5]);
+  }
+  return poly;
+}
+
 // --- MAIN APP ---
 
 export default function App() {
@@ -262,21 +247,15 @@ export default function App() {
   const [socket, setSocket] = useState(null);
   const [showMobileChat, setShowMobileChat] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
-  const [mapHeight, setMapHeight] = useState(50);
-  const [isResizing, setIsResizing] = useState(false);
-  const [filters, setFilters] = useState({ types: [], priceRanges: [], ratings: [] });
   
-  const [mapState, setMapState] = useState({ lat: 47.5162, lon: 10.1936, name: "Allgäu, Deutschland" }); 
-  const [recommendations, setRecommendations] = useState([]);
-
   const mapContainerRef = useRef(null);
-  const containerRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const routeLayerRef = useRef(null);
 
   // 1. WebSocket Verbindung herstellen
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/chat'); // ODER ws://192.168.0.70:8000/chat falls Localhost nicht geht
-
+    const ws = new WebSocket('ws://localhost:8000/chat'); 
     ws.onopen = () => console.log('✅ Connected to KIRA Backend');
     ws.onmessage = (event) => {
       const aiText = event.data;
@@ -291,31 +270,199 @@ export default function App() {
     return () => ws.close();
   }, []);
 
-  // 2. Leaflet Karte initialisieren
+  // 2. Leaflet Karte initialisieren (DAS HAT GEFEHLT!)
   useEffect(() => {
     if (!mapContainerRef.current) return;
-    const leafletLink = document.createElement('link');
-    leafletLink.rel = 'stylesheet';
-    leafletLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
-    document.head.appendChild(leafletLink);
+    
+    // Checken ob Leaflet CSS schon da ist
+    if (!document.getElementById('leaflet-css')) {
+        const link = document.createElement('link');
+        link.id = 'leaflet-css';
+        link.rel = 'stylesheet';
+        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(link);
+    }
 
-    const leafletScript = document.createElement('script');
-    leafletScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
-    leafletScript.onload = () => {
-      const map = window.L.map(mapContainerRef.current).setView([mapState.lat, mapState.lon], 11);
-      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-      return () => map.remove();
+    // Checken ob Leaflet JS schon da ist
+    if (!document.getElementById('leaflet-js')) {
+        const script = document.createElement('script');
+        script.id = 'leaflet-js';
+        script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+        document.head.appendChild(script);
+    }
+    
+    // Warten bis L verfügbar ist
+    const checkL = setInterval(() => {
+        if (window.L) {
+            clearInterval(checkL);
+            
+            // Map erstellen (falls noch nicht da)
+            if (!mapInstanceRef.current) {
+                const map = window.L.map(mapContainerRef.current).setView([47.5162, 10.1936], 11);
+                window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                mapInstanceRef.current = map;
+            }
+        }
+    }, 100);
+
+    return () => {
+        // Cleanup beim Unmount (optional)
+        // mapInstanceRef.current?.remove(); 
     };
-    document.body.appendChild(leafletScript);
   }, []);
 
-  // 3. Scroll to Bottom
+  // 3. Effect: Lauscht auf Nachrichten und zeichnet Routen
+ useEffect(() => {
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || lastMsg.sender !== 'ai' || !mapInstanceRef.current) return;
+
+    try {
+        const cleanText = lastMsg.text.replace(/```json/g, '').replace(/```/g, '').trim();
+        if (cleanText.startsWith('{')) {
+            const data = JSON.parse(cleanText);
+            
+            if (!routeLayerRef.current) {
+                routeLayerRef.current = window.L.layerGroup().addTo(mapInstanceRef.current);
+            }
+            routeLayerRef.current.clearLayers();
+
+            const routesToDraw = [];
+            const markersMap = new Map(); 
+
+            const addMarker = (lat, lon, type, name) => {
+                const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+                const existing = markersMap.get(key);
+                if (type === 'activity') {
+                    markersMap.set(key, { pos: [lat, lon], type, name });
+                    return;
+                }
+                if (existing && existing.type === 'activity') return; 
+                if (type === 'transfer') {
+                     markersMap.set(key, { pos: [lat, lon], type, name });
+                     return;
+                }
+                if (!existing) {
+                    markersMap.set(key, { pos: [lat, lon], type, name });
+                }
+            };
+
+            // --- NEU: INTELLIGENTE FARB-LOGIK ---
+            const processLegs = (legs, stepLabel) => {
+                const label = (stepLabel || '').toLowerCase();
+                
+                legs.forEach((leg, index) => {
+                    let legColor = '#f97316'; // Standard: Orange (für Activities/Zwischenwege)
+                    const isLast = index === legs.length - 1;
+                    const isFirst = index === 0;
+
+                    // Logik für Anreise (Blau -> Orange am Ende)
+                    if (label.includes('anreise') || label.includes('hinfahrt')) {
+                        legColor = '#3b82f6'; // Blau
+                        // Ausnahme: Das letzte Stück zu Fuß ist schon der Weg zum Museum
+                        if (isLast && leg.mode === 'WALK') {
+                            legColor = '#f97316'; // Orange
+                        }
+                    } 
+                    // Logik für Rückreise (Orange am Anfang -> Rot)
+                    else if (label.includes('rückreise') || label.includes('rückfahrt')) {
+                        legColor = '#ef4444'; // Rot
+                        // Ausnahme: Das erste Stück zu Fuß ist noch der Weg vom Museum weg
+                        if (isFirst && leg.mode === 'WALK') {
+                            legColor = '#f97316'; // Orange
+                        }
+                    }
+
+                    if (leg.geometry) {
+                        routesToDraw.push({ points: decodePolyline(leg.geometry), color: legColor });
+                    }
+                    
+                    // Marker sammeln
+                    if (leg.from_coords) addMarker(leg.from_coords[0], leg.from_coords[1], 'transfer', leg.from);
+                    if (leg.stops) leg.stops.forEach(s => addMarker(s.lat, s.lon, 'stop', s.name));
+                    if (leg.to_coords) addMarker(leg.to_coords[0], leg.to_coords[1], 'transfer', leg.to);
+                });
+            };
+
+            // --- DATEN VERARBEITEN ---
+            if (data.legs) {
+                processLegs(data.legs, 'anreise'); // Single Trip = Anreise Logik
+            } 
+            else if (data.type === 'activity_list') {
+                 data.items.forEach(item => {
+                     if (item.lat && item.lon) addMarker(item.lat, item.lon, 'activity', item.name);
+                 });
+            }
+            else if (data.type === 'multi_step_plan') {
+                data.steps.forEach((step, idx) => {
+                    if (step.type === 'trip' && step.data.legs) {
+                        // Wir übergeben das Label ("Anreise", "Rückreise") an die Logik
+                        let smartLabel = step.label || 'weiterfahrt';
+                        
+                        // Fallback falls Label fehlt
+                        if (idx === 0) smartLabel = 'anreise';
+                        if (idx === data.steps.length - 1) smartLabel = 'rückreise';
+
+                        processLegs(step.data.legs, smartLabel);
+                    }
+                    if (step.type === 'activity' && step.data.lat && step.data.lon) {
+                        addMarker(step.data.lat, step.data.lon, 'activity', step.data.name);
+                    }
+                });
+            }
+
+            // --- ZEICHNEN ---
+            const allLatLngs = [];
+            routesToDraw.forEach(route => {
+                window.L.polyline(route.points, { color: route.color, weight: 5, opacity: 0.8 }).addTo(routeLayerRef.current);
+                allLatLngs.push(...route.points);
+            });
+
+            markersMap.forEach((pt) => {
+                let color = '#3b82f6'; 
+                let fillColor = '#3b82f6';
+                let radius = 6;
+                let zIndexOffset = 0;
+
+                if (pt.type === 'activity') {
+                    color = '#ffffff';
+                    fillColor = '#f97316'; 
+                    radius = 9;       
+                    zIndexOffset = 1000;
+                } else if (pt.type === 'stop') {
+                    color = '#3b82f6';
+                    fillColor = '#ffffff'; 
+                    radius = 4;
+                } 
+                
+                window.L.circleMarker(pt.pos, {
+                    radius: radius,
+                    fillColor: fillColor,
+                    color: color,
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 1,
+                    zIndexOffset: zIndexOffset
+                }).bindPopup(pt.name).addTo(routeLayerRef.current);
+                
+                allLatLngs.push(pt.pos);
+            });
+
+            if (allLatLngs.length > 0) {
+                const bounds = window.L.latLngBounds(allLatLngs);
+                mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
+            }
+        }
+    } catch (e) {
+        console.error("Map Draw Error:", e);
+    }
+  }, [messages]);
+
+  // 4. Scroll to Bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
 
-  // 4. NACHRICHT SENDEN (Die wichtigste Funktion!)
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
@@ -325,7 +472,6 @@ export default function App() {
     setMessages(prev => [...prev, { id: Date.now(), sender: 'user', text: userText }]);
     setIsLoading(true);
 
-    // An Backend senden statt selber zu suchen!
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(userText);
     } else {
@@ -339,114 +485,25 @@ export default function App() {
   };
 
   const testTripCard = () => {
-    const mockTripJSON = JSON.stringify({
-      date: "2026-01-30",
-      start: "Fischen",
-      end: "Sonthofen (Hotel)",
-      total_duration: "35", // Dauer angepasst
-      legs: [
-        { 
-          mode: "WALK", 
-          line: "", 
-          from: "Dein Standort", 
-          to: "Fischen Bhf", 
-          start_time: "08:00", 
-          end_time: "08:10", 
-          duration: 10 
-        },
-        { 
-          mode: "RAIL", 
-          line: "RE 17", 
-          from: "Fischen Bhf", 
-          to: "Sonthofen Bf", 
-          start_time: "08:12", 
-          end_time: "08:20", 
-          duration: 8 
-        },
-        // --- HIER IST DER NEUE BUS ---
-        { 
-          mode: "BUS", 
-          line: "Bus 45", // Bus-Linie
-          from: "Sonthofen Bf", 
-          to: "Rathausplatz", 
-          start_time: "08:25", // 5 Min Umstieg
-          end_time: "08:32", 
-          duration: 7 
-        },
-        // -----------------------------
-        { 
-          mode: "WALK", 
-          line: "", 
-          from: "Rathausplatz", 
-          to: "Zielort (Hotel)", 
-          start_time: "08:32", 
-          end_time: "08:35", 
-          duration: 3 
-        }
-      ]
-    });
-    setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: mockTripJSON }]);
+    // Einfache Testfunktion
   };
 
-  // --- NEUER CODE START ---
   const handleDemoClick = () => {
-    // Das exakte Datenformat, das deine TripCard erwartet
     const demoJson = JSON.stringify({
       date: "2026-01-30",
       start: "Fischen",
       end: "Sonthofen",
       total_duration: "23",
       legs: [
-        { 
-          mode: "WALK", 
-          line: "", 
-          from: "Dein Standort", 
-          to: "Fischen Bhf", 
-          start_time: "08:00", 
-          end_time: "08:10", 
-          duration: 10 
-        },
-        { 
-          mode: "RAIL", 
-          line: "RE 17", // Echter Zugname für Realismus
-          from: "Fischen Bhf", 
-          to: "Sonthofen Bf", 
-          start_time: "08:12", 
-          end_time: "08:20", 
-          duration: 8 
-        },
-        { 
-          mode: "WALK", 
-          line: "", 
-          from: "Sonthofen Bf", 
-          to: "Zielort", 
-          start_time: "08:20", 
-          end_time: "08:25", 
-          duration: 5 
-        }
+        { mode: "WALK", from: "Dein Standort", to: "Fischen Bhf", start_time: "08:00", end_time: "08:10", duration: 10, geometry: "_p~iF~ps|U_ulLnnqC" },
+        { mode: "RAIL", line: "RE 17", from: "Fischen Bhf", to: "Sonthofen Bf", start_time: "08:12", end_time: "08:20", duration: 8, geometry: "_p~iF~ps|U_ulLnnqC" }
       ]
     });
-    
-    // Fügt die Nachricht hinzu, deine ChatMessage-Komponente rendert dann automatisch die Karte
     setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: demoJson }]);
   };
-  // --- NEUER CODE ENDE ---
-  
-  <div className="flex gap-2">
-            <button onClick={testTripCard} className="text-xs bg-emerald-100 text-emerald-700 px-3 py-1 rounded">
-  🎫 Demo: Fischen Ticket
-</button>
-            
-            {/* --- NEUER BUTTON --- */}
-            <button onClick={handleDemoClick} className="text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded font-bold">
-              🎫 Demo: Fischen-Sonthofen
-            </button>
-            {/* -------------------- */}
-            
-          </div>
 
   return (
-    <div className="h-screen w-full bg-slate-50 flex flex-col md:flex-row overflow-hidden font-sans rounded-3xl" ref={containerRef}>
+    <div className="h-screen w-full bg-slate-50 flex flex-col md:flex-row overflow-hidden font-sans rounded-3xl">
       
       {/* Linke Seite: Chat */}
       <div className={`${showMobileChat ? 'flex' : 'hidden'} md:flex flex-col w-full md:w-112.5 bg-white border-r border-slate-200 z-20 h-full`}>
@@ -472,7 +529,9 @@ export default function App() {
             <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl"><Send size={18} /></button>
           </form>
           <div className="flex gap-2">
-            <button onClick={testTripCard} className="text-xs bg-emerald-100 text-emerald-700 px-3 py-1 rounded">Test Card</button>
+            <button onClick={handleDemoClick} className="text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded font-bold">
+              🎫 Demo: Fischen-Sonthofen
+            </button>
           </div>
         </div>
       </div>
@@ -486,7 +545,7 @@ export default function App() {
         </div>
       </div>
 
-      <FilterPanel isOpen={showFilters} onClose={() => setShowFilters(false)} filters={filters} setFilters={setFilters}/>
+      <FilterPanel isOpen={showFilters} onClose={() => setShowFilters(false)}/>
     </div>
   );
 }

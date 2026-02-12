@@ -5,22 +5,27 @@ import asyncio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-current_dir = os.path.dirname(os.path.abspath(__file__))   # Wo bin ich? (src/Backend)
-mcp_path = os.path.abspath(os.path.join(current_dir, "..", "MCP")) # Der Weg zum Nachbarn
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+mcp_path = os.path.abspath(os.path.join(current_dir, "..", "MCP"))
 if mcp_path not in sys.path:
     sys.path.append(mcp_path)
-from agent_server import plan_journey_logic, plan_activities_logic, plan_complete_trip_logic, plan_multiday_trip_logic, find_best_city_logic
 
-# Importiere deine Tools
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../MCP")))
-from agent_server import plan_journey, plan_activities
+# Alle Logic-Funktionen importieren
+from agent_server import (
+    plan_journey_logic, 
+    plan_activities_logic, 
+    plan_complete_trip_logic, 
+    plan_multiday_trip_logic, 
+    find_best_city_logic
+)
+
 from openai import AzureOpenAI
 
 load_dotenv()
 
 app = FastAPI()
 
-# CORS erlauben (damit React zugreifen darf)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,7 +34,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Azure Client
 client = AzureOpenAI(
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
@@ -37,13 +41,13 @@ client = AzureOpenAI(
 )
 DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o")
 
-# Tools Definition für GPT
+# --- TOOLS SCHEMA ---
 tools_schema = [
     {
         "type": "function",
         "function": {
             "name": "plan_journey",
-            "description": "Plant eine Reise. MUSS benutzt werden wenn nach Routen gefragt wird.",
+            "description": "Plans a simple A to B route (public transport or walking).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -59,7 +63,7 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "plan_activities",
-            "description": "Sucht nach Aktivitäten.",
+            "description": "Finds activities, museums, or restaurants in a location.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -70,18 +74,17 @@ tools_schema = [
             }
         }
     },
-
     {
         "type": "function",
         "function": {
             "name": "plan_complete_trip",
-            "description": "Plans a full itinerary from A to B including stops at interesting places (museums, restaurants). Use this when user asks for a trip WITH activities.",
+            "description": "Plans a ONE-DAY trip from A to B with stops (museums, etc.). Use for requests like 'Plan a trip to Sonthofen with museums'.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "interest": {"type": "string", "description": "Type of activity, e.g. 'Museums' or 'Food'"}
+                    "interest": {"type": "string"}
                 },
                 "required": ["start", "end", "interest"]
             }
@@ -91,16 +94,13 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "plan_multiday_trip",
-            "description": "Generates a full itinerary for a specific number of days. Use this when the user asks for a 'trip', 'weekend' (2 days), or specifies a duration.",
+            "description": "Plans a MULTI-DAY itinerary (e.g. 'Weekend', '3 days').",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "days": {
-                        "type": "integer", 
-                        "description": "Number of days. Extract from user prompt (e.g. 'weekend' = 2, '3 days' = 3). Default to 4 if not specified."
-                    }
+                    "days": {"type": "integer"}
                 },
                 "required": ["start", "end"]
             }
@@ -110,21 +110,16 @@ tools_schema = [
         "type": "function",
         "function": {
             "name": "find_best_city",
-            "description": "Finds the best matching city/town in Allgäu for specific interests (e.g. 'Quad', 'Wellness'). Use this FIRST if the user does not specify a destination city.",
+            "description": "Internal Tool: Finds a city if the user didn't specify one.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The interests, e.g. 'Quad activities and water sports'"}
+                    "query": {"type": "string"}
                 },
                 "required": ["query"]
             }
         }
     }
-
-
-
-
-
 ]
 
 @app.websocket("/chat")
@@ -132,27 +127,27 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("✅ Frontend verbunden!")
     
-    # SYSTEM PROMPT UPDATE: Instruktionen für den mehrstufigen Prozess
+    # SYSTEM PROMPT UPDATE: Flexibler & Strenger gegen Plauderei
     messages = [{
         "role": "system", 
         "content": (
-            "Du bist KIRA. "
-            "1. Wenn der User keine Zielstadt nennt, nutze 'find_best_city' um sie zu finden. "
-            "2. Wenn der User keinen Startort nennt, nimm 'Fischen' als Standard an. "
-            "3. Nutze DANN 'plan_multiday_trip' um den Plan zu erstellen. "
-            "4. Antworte bei Tools NUR mit dem JSON."
+            "Du bist KIRA. Deine Aufgabe ist es, JSON-Daten für das Frontend zu generieren.\n"
+            "REGELN:\n"
+            "1. Wenn das Ziel unbekannt ist -> Nutze 'find_best_city'.\n"
+            "2. Für Tagesausflüge/Routen mit Stopps -> Nutze 'plan_complete_trip'.\n"
+            "3. Für Mehrtagesreisen/Wochenenden -> Nutze 'plan_multiday_trip'.\n"
+            "4. WICHTIG: Sobald du ein Planungs-Tool (Punkt 2 oder 3) aufgerufen hast, ist deine Arbeit erledigt. "
+            "Generiere danach KEINEN Text mehr."
         )
     }]
 
     try:
         while True:
-            # 1. User Input empfangen
             user_text = await websocket.receive_text()
             print(f"📩 User: {user_text}")
             messages.append({"role": "user", "content": user_text})
 
-            # --- START: KI-LOOP (MULTI-STEP) ---
-            # Wir loopen so lange, bis die KI keine Tools mehr aufruft (oder max 5 mal)
+            # KI Loop (max 5 Schritte)
             for _ in range(5): 
                 response = client.chat.completions.create(
                     model=DEPLOYMENT_NAME,
@@ -162,53 +157,60 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
                 
                 response_msg = response.choices[0].message
-                messages.append(response_msg) # Antwort (oder Tool Call) ins Gedächtnis
+                messages.append(response_msg)
 
                 if response_msg.tool_calls:
-                    # Die KI will Tools nutzen!
+                    should_break_loop = False # Flag zum Stoppen
+
                     for tool_call in response_msg.tool_calls:
                         func_name = tool_call.function.name
                         args = json.loads(tool_call.function.arguments)
-                        print(f"⚙️ Tool Call: {func_name}")
+                        print(f"⚙️ Tool: {func_name}")
                         
                         result_str = ""
-                        # Tool Routing
-                        if func_name == "plan_journey":
-                            result_str = plan_journey_logic(**args)
-                            await websocket.send_text(result_str) # JSON an Frontend
+                        
+                        # A. INTERNE TOOLS (Loop läuft weiter)
+                        if func_name == "find_best_city":
+                            city = find_best_city_logic(**args)
+                            result_str = f"City found: {city}. Now call a planning tool for {city}."
+                            print(f"   📍 Intern: {city}")
 
-                        elif func_name == "plan_activities":
-                            result_str = plan_activities_logic(**args)
-                            await websocket.send_text(result_str) # JSON an Frontend
-
-                        elif func_name == "plan_multiday_trip":
-                            result_str = plan_multiday_trip_logic(**args)
-                            await websocket.send_text(result_str) # JSON an Frontend
+                        # B. VISUELLE TOOLS (JSON senden & Loop stoppen!)
+                        else:
+                            if func_name == "plan_journey":
+                                result_str = plan_journey_logic(**args)
+                            elif func_name == "plan_activities":
+                                result_str = plan_activities_logic(**args)
+                            elif func_name == "plan_complete_trip":
+                                result_str = plan_complete_trip_logic(**args)
+                            elif func_name == "plan_multiday_trip":
+                                result_str = plan_multiday_trip_logic(**args)
                             
-                        elif func_name == "find_best_city":
-                            # Hier senden wir NICHTS an das Frontend, 
-                            # das ist nur ein interner Zwischenschritt für die KI!
-                            result_str = find_best_city_logic(**args)
-                            print(f"   📍 Stadt gefunden: {result_str}")
+                            # SOFORT SENDEN
+                            await websocket.send_text(result_str)
+                            
+                            # Wir haben eine Karte gesendet -> STOPP!
+                            # Wir wollen nicht, dass die KI danach noch Text schreibt.
+                            should_break_loop = True
 
-                        # Ergebnis zurück ins Gedächtnis, damit die KI weitermachen kann
+                        # Ergebnis ins Gedächtnis
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": result_str
                         })
-                    
-                    # WICHTIG: Der Loop läuft weiter! 
-                    # Die KI liest jetzt das Tool-Ergebnis (z.B. "Oberstdorf") 
-                    # und entscheidet im nächsten Durchlauf: "Aha, jetzt plane ich den Trip nach Oberstdorf."
+
+                    # Wenn wir eine Karte gesendet haben, brechen wir den KI-Loop ab.
+                    # Die KI darf keine Zusammenfassung mehr schreiben.
+                    if should_break_loop:
+                        break 
                     
                 else:
-                    # Keine Tools mehr? Dann ist es die finale Textantwort.
+                    # Nur wenn KEIN Tool benutzt wurde, senden wir Text
                     final_text = response_msg.content
                     if final_text:
                         await websocket.send_text(final_text)
-                    break # KI ist fertig, warte auf neuen User Input
-            # --- ENDE KI-LOOP ---
+                    break 
 
     except WebSocketDisconnect:
         print("❌ Frontend getrennt")
