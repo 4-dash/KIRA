@@ -17,13 +17,14 @@ import json
 import random
 from collections import Counter
 from math import radians, cos, sin, asin, sqrt
+from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 # 1. KONFIGURATION LADEN
 load_dotenv()
 
 # --- DEINE ORIGINALE KONFIGURATION (UNVERÄNDERT) ---
 OTP_URL = "http://localhost:8080/otp/routers/default/index/graphql"
 OPENSEARCH_HOST = {'host': 'localhost', 'port': 9200}
-INDEX_NAME = "tourism-data-v6"
+INDEX_NAME = "tourism-data-v7"
 # ---------------------------------------------------
 def log(msg):
     sys.stderr.write(f"[LOG] {msg}\n")
@@ -52,17 +53,30 @@ mcp = FastMCP("KIRA-Agent-Server")
 # --- KONFIGURATION FÜR DATENBANK ---
 OPENSEARCH_HOST = "localhost"  # Geht via SSH-Tunnel zur VM
 OPENSEARCH_PORT = 9200
-INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v6")
+INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v7")
 
 # --- ACTIVITY ENGINE SETUP ---
 activity_retriever = None 
+AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_API_KEY")
+AZURE_EMBED_ENDPOINT = os.getenv("AZURE_EMBED_ENDPOINT")
+# Fallback auf den Modellnamen, falls Variable leer ist
+AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME_EMBED", "text-embedding-3-large") 
+AZURE_API_VERSION = os.getenv("AZURE_API_VERSION_EMBED", "2024-02-01")
+EMBED_DIM = int(os.getenv("EMBED_DIM", "3072"))
 
 try:
+    sys.stderr.write(f"[SERVER] Setup Embeddings: Endpoint='{AZURE_EMBED_ENDPOINT}', Deployment='{AZURE_DEPLOYMENT_NAME}'\n")
+    
     # 1. Embedding Modell laden
-    sys.stderr.write("[SERVER] Lade Embedding Modell...\n")
-    Settings.embed_model = HuggingFaceEmbedding(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    Settings.llm = None 
-
+    embed_model = AzureOpenAIEmbedding(
+        model="text-embedding-3-large",
+        deployment_name=AZURE_DEPLOYMENT_NAME,
+        api_key=AZURE_OPENAI_KEY,
+        azure_endpoint=AZURE_EMBED_ENDPOINT,
+        api_version=AZURE_API_VERSION,
+    )
+    Settings.embed_model = embed_model
+    Settings.llm = None
     # 2. Verbindung zur VM-Datenbank
     sys.stderr.write(f"[SERVER] Verbinde zu OpenSearch Index '{INDEX_NAME}'...\n")
     os_client = OpenSearch(
@@ -74,7 +88,7 @@ try:
     client_wrapper = OpensearchVectorClient(
         endpoint=f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}",
         index=INDEX_NAME,
-        dim=384,
+        dim=EMBED_DIM,
         embedding_field="embedding",
         text_field="description",
         os_client=os_client
@@ -107,6 +121,38 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * asin(sqrt(a))
     return R * c
 
+def encode_polyline(points):
+    """
+    Wandelt eine Liste von [lat, lon] Punkten in einen Google Polyline String um.
+    Das braucht das Frontend, um Linien zu zeichnen (genau wie bei OTP).
+    """
+    result = []
+    last_lat = 0
+    last_lon = 0
+
+    for point in points:
+        # Auf 5 Nachkommastellen runden & in Integer wandeln
+        lat = int(round(point[0] * 1e5))
+        lon = int(round(point[1] * 1e5))
+
+        d_lat = lat - last_lat
+        d_lon = lon - last_lon
+
+        _encode_value(d_lat, result)
+        _encode_value(d_lon, result)
+
+        last_lat = lat
+        last_lon = lon
+
+    return "".join(result)
+
+def _encode_value(value, result):
+    value = ~(value << 1) if value < 0 else (value << 1)
+    while value >= 0x20:
+        result.append(chr((0x20 | (value & 0x1f)) + 63))
+        value >>= 5
+    result.append(chr(value + 63))
+
 def get_coords(target_name: str):
     """
     FIX: Nutzt Nominatim (OpenStreetMap) statt OTP GraphQL.
@@ -129,7 +175,11 @@ def get_coords(target_name: str):
     return None, None
 
 def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
-    # UPDATE: Wir fragen jetzt auch 'intermediateStops' ab!
+    # UPDATE: "Ultra-Lazy-Mode"
+    # Wir erlauben weite Wege zur Haltestelle (5km), damit er das Naturschutzgebiet erreicht.
+    # ABER: Wir setzen walkReluctance auf 500! Das ist astronomisch hoch.
+    # Das zwingt den Router, jeden Meter Fußweg zu vermeiden, wenn IRGENDWIE ein Bus fährt.
+    
     query = """
     query PlanTrip($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!, $date: String!, $time: String!) {
       plan(
@@ -139,7 +189,9 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
         time: $time
         numItineraries: 3
         transportModes: [{mode: TRANSIT}, {mode: WALK}]
-        walkReluctance: 2.0
+        walkReluctance: 500.0    # <--- EXTREM! Laufen ist der absolute Feind.
+        waitReluctance: 0.1      # <--- Warten ist okay.
+        maxWalkDistance: 5000.0  # <--- Radius groß genug für abgelegene Ziele.
       ) {
         itineraries {
           duration
@@ -152,7 +204,7 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
             route { shortName longName }
             from { name lat lon }
             to { name lat lon }
-            intermediateStops { name lat lon }  # <--- NEU: Alle Haltestellen dazwischen!
+            intermediateStops { name lat lon }
           }
         }
       }
@@ -270,23 +322,16 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
 
     search_query = f"{interest} in {location}" if interest else f"Highlights in {location}"
     
-    # --- DYNAMISCHE KONFIGURATION ---
-    # Standard: Weiter Radius für Natur/Wandern (15 km)
+    # --- DYNAMISCHE RADIUS KONFIGURATION ---
     max_radius = 15.0 
-    required_keywords = []
-    
     lower_interest = interest.lower()
     
-    # SPEZIAL-REGELN FÜR STADT-AKTIVITÄTEN
     if "museum" in lower_interest:
         search_query = f"Museum Ausstellung Geschichte Kultur in {location}"
-        required_keywords = ["museum", "galerie", "ausstellung", "heimathaus", "sammlung"]
-        max_radius = 3.0 # Museen müssen zentral sein
-        
+        max_radius = 3.0 
     elif "food" in lower_interest or "essen" in lower_interest or "restaurant" in lower_interest:
          search_query = f"Restaurant Gasthof Essen Traditionelle Küche in {location}"
-         required_keywords = ["restaurant", "gasthof", "gaststätte", "bräu", "stube", "wirtshaus", "pizzeria"]
-         max_radius = 3.0 # Zum Essen will man nicht weit fahren
+         max_radius = 3.0
 
     try:
         sys.stderr.write(f"[LOGIC] Suche Activities: '{search_query}' (Radius {max_radius}km)\n")
@@ -298,20 +343,8 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
             node = node_with_score.node
             meta = node.metadata
             name = meta.get("name", "Unbekannt")
-            lower_name = name.lower()
-            raw_category = str(meta.get("category", "")).lower()
             
-            # --- 🛡️ TÜRSTEHER (Nur aktiv wenn Keywords gesetzt) ---
-            if required_keywords:
-                match_found = False
-                for kw in required_keywords:
-                    if kw in lower_name or kw in raw_category:
-                        match_found = True
-                        break
-                if not match_found: continue
-            # ------------------------------------------------------
-
-            # Koordinaten Parsing
+            # 1. Koordinaten (Punkt)
             lat = None
             lon = None
             if "lat" in meta: lat = meta["lat"]
@@ -335,14 +368,47 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
             lat = float(lat)
             lon = float(lon)
 
-            # --- DYNAMISCHER RADIUS CHECK ---
+            # Radius Check
             dist = calculate_distance(center_lat, center_lon, lat, lon)
             if dist > max_radius: continue
 
-            # Kategorie Display
+           # --- 🔥 GEOMETRIE PARSEN & ENCODEN 🔥 ---
+            encoded_geometry = None
+            geometry_points = []
+            
+            if "geo_line" in meta:
+                raw_geo = meta["geo_line"]
+                try:
+                    if isinstance(raw_geo, str):
+                        raw_geo = json.loads(raw_geo.replace("'", '"'))
+                    
+                    coords_source = []
+                    geo_type = raw_geo.get("type")
+                    
+                    if geo_type == "LineString":
+                        coords_source = raw_geo["coordinates"]
+                    elif geo_type == "MultiLineString":
+                        for segment in raw_geo["coordinates"]:
+                            coords_source.extend(segment)
+                            
+                    # Umwandlung [Lon, Lat] -> [Lat, Lon]
+                    for p in coords_source:
+                        if isinstance(p, list) and len(p) >= 2:
+                            # Ignoriere 3. Wert (Höhe), falls vorhanden
+                            geometry_points.append([p[1], p[0]])
+                    
+                    # JETZT WIRD ENCODIERT!
+                    if geometry_points:
+                        encoded_geometry = encode_polyline(geometry_points)
+
+                except Exception as e:
+                    sys.stderr.write(f"[WARN] Geometrie-Fehler bei {name}: {e}\n")
+
+            # ---------------------------------------------------------
+
             cat_display = meta.get("type", "Attraction")
-            if "museum" in lower_name or "heimathaus" in lower_name: cat_display = "Museum"
-            elif "gasthof" in lower_name or "restaurant" in lower_name: cat_display = "Restaurant"
+            if "museum" in name.lower() or "heimathaus" in name.lower(): cat_display = "Museum"
+            elif "gasthof" in name.lower() or "restaurant" in name.lower(): cat_display = "Restaurant"
 
             activity_item = {
                 "name": name,
@@ -351,7 +417,8 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
                 "description": node.get_text()[:150] + "...",
                 "lat": lat,
                 "lon": lon,
-                "source": meta.get("source", "unknown")
+                "source": meta.get("source", "unknown"),
+                "geometry": encoded_geometry # <--- Jetzt als String!
             }
             
             if any(a['name'] == activity_item['name'] for a in activities_list): continue
@@ -368,6 +435,10 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
     except Exception as e:
         sys.stderr.write(f"[ERROR] DB-Fehler in plan_activities: {e}\n")
         return json.dumps({"error": str(e)})
+
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] DB-Fehler in plan_activities: {e}\n")
+        return json.dumps({"error": str(e)})
     
 def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int = 2) -> str:
     sys.stderr.write(f"[LOGIC] Plane Rundreise: {start} -> {end} ({interest}) -> {start}\n")
@@ -377,21 +448,17 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
          return json.dumps({"type": "error", "message": f"Startort {start} nicht gefunden."})
     start_coords = (start_lat, start_lon)
 
-    # --- SCHRITT 1: INTERESSEN ANALYSE ---
+    # --- SCHRITT 1: INTERESSEN & SPLIT ---
     interests_to_search = []
     lower_int = interest.lower()
     
-    # Prüfen auf die "Museum & Food" Kombi
     wants_museum = "museum" in lower_int or "kultur" in lower_int
     wants_food = "food" in lower_int or "essen" in lower_int or "restaurant" in lower_int
     
     if wants_museum and wants_food:
-        # JA, das ist die Spezial-Kombi -> Split!
         interests_to_search.append("Museum Geschichte Kultur")
         interests_to_search.append("Gasthof Restaurant Essen")
     else:
-        # NEIN, normale Suche (z.B. "Wandern", "Aussicht", "Action")
-        # Wir suchen einfach 2x nach dem Thema, um verschiedene Treffer zu kriegen
         interests_to_search = [interest, interest]
 
     # --- SCHRITT 2: AKTIVITÄTEN SAMMELN ---
@@ -407,7 +474,7 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
                 if item["name"] not in seen_names:
                     stops.append(item)
                     seen_names.add(item["name"])
-                    break # Top 1 pro Runde
+                    break 
         
         if len(stops) >= num_stops: break
 
@@ -415,33 +482,89 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
     if not stops:
         intro_msg = f"Keine passenden Aktivitäten in {end} gefunden. Hier ist die reine Fahrt:"
 
-    # --- SCHRITT 3: ROUTING (Identisch wie zuvor) ---
+    # --- SCHRITT 3: ROUTING MIT ZEIT-MANAGEMENT 🕒 ---
     steps = []
     current_coords = start_coords
     current_name = start
     
+    # Wir starten morgen um 09:00 Uhr
+    current_time_obj = datetime.now() + timedelta(days=1)
+    current_time_obj = current_time_obj.replace(hour=9, minute=0, second=0)
+    
     for i, stop in enumerate(stops):
         stop_name = stop["name"]
         stop_coords = (stop["lat"], stop["lon"])
-        label = f"Fahrt zu: {stop['category']} ({stop_name})"
+        label = f"Anreise zu: {stop['category']} ({stop_name})"
         
+        # Dynamischen Zeit-String bauen
+        time_str_dynamic = f"tomorrow {current_time_obj.strftime('%H:%M')}"
+        
+        # 1. ECHTE ANREISE (Bus/Bahn)
         trip_json = plan_journey_logic(
-            start=current_name, end=stop_name, time_str="tomorrow 09:00",
+            start=current_name, end=stop_name, time_str=time_str_dynamic,
             start_coords_override=current_coords, end_coords_override=stop_coords
         )
         trip_data = json.loads(trip_json)
         
+        trip_duration_minutes = 30 # Fallback
+        
         if "legs" in trip_data:
             steps.append({ "type": "trip", "data": trip_data, "label": label })
+            trip_duration_minutes = trip_data.get("total_duration", 30)
         else:
             steps.append({ "type": "error", "message": f"Kein Weg nach {stop_name}" })
 
+        # ZEIT UPDATE: Ankunft am Startpunkt der Wanderung
+        current_time_obj += timedelta(minutes=trip_duration_minutes)
+
+        # --- 🔥 NEU: VISUAL TRACKING (Wanderweg als Trip) 🔥 ---
+        # Wenn die Aktivität eine Geometrie hat (Wanderweg), erstellen wir einen
+        # künstlichen "Trip", damit die Karte die Linie zeichnet!
+        if stop.get("geometry"):
+            track_label = f"Route: {stop['name']}"
+            
+            # Wir simulieren eine 2-stündige Wanderung entlang des Pfades
+            hike_duration = 120 
+            
+            visual_trip = {
+                "start": stop["name"],
+                "end": stop["name"], # Rundweg
+                "date": current_time_obj.strftime("%d.%m.%Y"),
+                "total_duration": hike_duration,
+                "legs": [{
+                    "mode": "WALK",
+                    "from": stop["name"], # Start
+                    "to": stop["name"],   # Ziel
+                    "from_coords": [stop["lat"], stop["lon"]],
+                    "to_coords": [stop["lat"], stop["lon"]],
+                    "start_time": current_time_obj.strftime('%H:%M'),
+                    "end_time": (current_time_obj + timedelta(minutes=hike_duration)).strftime('%H:%M'),
+                    "line": "Wanderweg",
+                    "duration": hike_duration,
+                    "geometry": stop["geometry"] # <--- HIER IST DER MAGISCHE TRACK!
+                }]
+            }
+            # Diesen "Wander-Trip" fügen wir VOR der Aktivitäts-Karte ein
+            steps.append({ "type": "trip", "data": visual_trip, "label": track_label })
+            
+            # Zeit für die Wanderung draufrechnen
+            current_time_obj += timedelta(minutes=hike_duration)
+        # -------------------------------------------------------
+        else:
+            # Falls kein Track da ist, pauschal 90 Min Aufenthalt
+            current_time_obj += timedelta(minutes=90)
+
+        # 2. AKTIVITÄTS-KARTE
         steps.append({ "type": "activity", "data": stop })
+        
         current_coords = stop_coords
         current_name = stop_name
 
+    # Rückreise
+    time_str_return = f"tomorrow {current_time_obj.strftime('%H:%M')}"
+    
     final_trip_json = plan_journey_logic(
-        start=current_name, end=start, time_str="tomorrow 16:00",
+        start=current_name, end=start, time_str=time_str_return,
         start_coords_override=current_coords, end_coords_override=start_coords
     )
     final_trip_data = json.loads(final_trip_json)
@@ -460,15 +583,46 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
     return json.dumps(result)
 
 def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
-    """
-    Plant einen Trip mit variabler Dauer (days) UND berechnet die Routen
-    zwischen allen Aktivitäten (Chaining).
-    """
     if days < 1: days = 1
     
-    sys.stderr.write(f"[LOGIC] Plane Trip für {days} Tage mit Routen: {start} -> {end}\n")
+    sys.stderr.write(f"[LOGIC] Plane Trip für {days} Tage nach {end} (Basis-Strategie: Zentral)\n")
     
-    # 1. POOLS FÜLLEN
+    # 1. Start-Koordinaten
+    start_lat, start_lon = get_coords(start)
+    start_coords = (start_lat, start_lon) if start_lat else None
+    
+    end_lat, end_lon = get_coords(end)
+    if not end_lat:
+         return json.dumps({"type": "error", "message": f"Zielort {end} nicht gefunden."})
+
+    # 2. HOTEL-SUCHE MIT FALLBACK 🏨
+    # Strategie: Wir suchen ein Hotel < 2.5 km vom Zentrum.
+    # Wenn keines da ist (z.B. Sonthofen DB leer), nutzen wir das ZENTRUM als Basis.
+    
+    sys.stderr.write(f"[LOGIC] Suche Hotel in {end}...\n")
+    hotels_json = plan_activities_logic(end, "Hotel Unterkunft Central")
+    hotels_data = json.loads(hotels_json)
+    
+    hotel = None
+    if "items" in hotels_data:
+        for h in hotels_data["items"]:
+            dist = calculate_distance(end_lat, end_lon, h["lat"], h["lon"])
+            if dist <= 2.5: 
+                hotel = h
+                break
+    
+    if hotel:
+        base_name = hotel["name"]
+        base_coords = (hotel["lat"], hotel["lon"])
+        intro_text = f"Ich habe eine Reise nach {end} geplant. Deine Basis ist das **{base_name}**."
+    else:
+        # 🔥 FALLBACK: KEIN HOTEL GEFUNDEN -> STADT-ZENTRUM NUTZEN 🔥
+        base_name = f"{end} Zentrum"
+        base_coords = (end_lat, end_lon)
+        intro_text = f"Ich habe eine Reise nach {end} geplant. Da ich kein zentrales Hotel in der Datenbank gefunden habe, starten wir vom Zentrum."
+        sys.stderr.write(f"[WARN] Kein Hotel gefunden. Nutze Koordinaten von {end} als Basis.\n")
+
+    # 3. POOLS FÜLLEN
     museums = json.loads(plan_activities_logic(end, "Museum"))
     food = json.loads(plan_activities_logic(end, "Restaurant Gaststätte"))
     leisure = json.loads(plan_activities_logic(end, "Wandern Natur Freizeit"))
@@ -479,98 +633,142 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
     
     steps = []
     
-    # Hilfsfunktion: Holt nächstes Item
     def get_item(pool):
         return pool.pop(0) if pool else None
 
-    # Hilfsfunktion: Berechnet Route und fügt sie in die Steps ein
-    def add_route(origin, destination, time_str, label="Fahrt"):
-        if not origin or not destination: return
+    # --- HELPER: ROUTE ---
+    def add_route(origin_name, origin_coords, dest_name, dest_coords, time_str, label="Fahrt"):
+        if not origin_name or not dest_name: return
         
-        # Wir nutzen deine existierende Logic
-        trip_json = plan_journey_logic(origin, destination, time_str)
+        # Check: Sind wir schon da?
+        dist = calculate_distance(origin_coords[0], origin_coords[1], dest_coords[0], dest_coords[1])
+        if dist < 0.2: return
+
+        trip_json = plan_journey_logic(
+            start=origin_name, end=dest_name, time_str=time_str,
+            start_coords_override=origin_coords, end_coords_override=dest_coords      
+        )
         trip_data = json.loads(trip_json)
         
         if "legs" in trip_data:
             steps.append({ "type": "trip", "data": trip_data, "label": label })
         else:
-            steps.append({ 
-                "type": "error", 
-                "message": f"Kein Weg gefunden von {origin} nach {destination}" 
-            })
+            steps.append({ "type": "error", "message": f"Kein Weg von {origin_name} nach {dest_name}" })
 
-    # Das "Hotel" oder der zentrale Punkt ist der Zielort (z.B. Sonthofen)
-    base_location = end 
-    current_loc = start # Wir starten zuhause
+    # --- HELPER: WANDERUNG ---
+    def add_visual_tracking(activity):
+        if activity.get("geometry"):
+             visual_trip = {
+                "start": activity["name"], "end": activity["name"], "date": "Wandertag",
+                "total_duration": 120,
+                "legs": [{
+                    "mode": "WALK", "from": activity["name"], "to": activity["name"],
+                    "from_coords": [activity["lat"], activity["lon"]],
+                    "to_coords": [activity["lat"], activity["lon"]],
+                    "start_time": "10:30", "end_time": "12:30",
+                    "line": "Wanderweg", "duration": 120, "geometry": activity["geometry"]
+                }]
+            }
+             steps.append({ "type": "trip", "data": visual_trip, "label": f"Route: {activity['name']}" })
 
-    # --- TAG 1: Anreise & Check-in ---
-    steps.append({ "type": "header", "title": "📅 Tag 1: Anreise & Erstes Erkunden" })
+    # Start-Zustand
+    curr_name = start
+    curr_coords = start_coords
+
+    # === TAG 1 ===
+    steps.append({ "type": "header", "title": "📅 Tag 1: Anreise & Start" })
     
-    # 1. Fahrt: Zuhause -> Hotel/Stadtmitte
-    add_route(current_loc, base_location, "tomorrow 10:00", "Anreise")
-    current_loc = base_location # Wir sind jetzt im Hotel/Ort
+    # 1. Anreise Basis
+    add_route(curr_name, curr_coords, base_name, base_coords, "tomorrow 11:00", f"Anreise nach {end}")
     
-    # 2. Erste Aktivität
-    act1 = get_item(pool_museums) or get_item(pool_leisure)
+    if hotel: steps.append({ "type": "activity", "data": hotel })
+    
+    curr_name = base_name
+    curr_coords = base_coords
+    
+    # 2. Nachmittag
+    act1 = get_item(pool_leisure) or get_item(pool_museums)
     if act1:
-        add_route(current_loc, act1["name"], "tomorrow 14:00") # Weg dorthin
-        steps.append({ "type": "activity", "data": act1 })     # Die Aktivität
-        current_loc = act1["name"]                             # Wir sind jetzt dort
-        
-    # 3. Abendessen
-    dinner = get_item(pool_food)
-    if dinner:
-        add_route(current_loc, dinner["name"], "tomorrow 18:00")
-        steps.append({ "type": "activity", "data": dinner })
-        # Wir lassen den User beim Restaurant "stehen" (Rückweg zum Hotel implizit)
+        act1_coords = (act1["lat"], act1["lon"])
+        add_route(curr_name, curr_coords, act1["name"], act1_coords, "tomorrow 14:30", "Erster Ausflug")
+        add_visual_tracking(act1)
+        steps.append({ "type": "activity", "data": act1 })
+        curr_name = act1["name"]
+        curr_coords = act1_coords
 
-    # --- MITTELTEIL (Tag 2 bis Vorletzter Tag) ---
+    # 3. Abendessen & RÜCKWEG
+    dinner1 = get_item(pool_food)
+    if dinner1:
+        dinner_coords = (dinner1["lat"], dinner1["lon"])
+        add_route(curr_name, curr_coords, dinner1["name"], dinner_coords, "tomorrow 18:30", "Zum Abendessen")
+        steps.append({ "type": "activity", "data": dinner1 })
+        
+        # 🔥 ZWINGENDER RÜCKWEG 🔥
+        add_route(dinner1["name"], dinner_coords, base_name, base_coords, "tomorrow 20:30", "Zurück zur Unterkunft")
+    else:
+        # Kein Restaurant gefunden? Dann direkt zurück zur Basis (falls wir nicht schon da sind)
+        add_route(curr_name, curr_coords, base_name, base_coords, "tomorrow 19:00", "Zurück zur Unterkunft")
+
+    # === TAGE 2 bis N ===
     for i in range(2, days):
         steps.append({ "type": "header", "title": f"📅 Tag {i}: Entdeckungstour" })
         
-        # Morgens starten wir wieder vom "Hotel" (Basis)
-        current_loc = base_location 
+        # Morgens immer von der Basis starten
+        curr_name = base_name
+        curr_coords = base_coords
         
         # Vormittag
         act_am = get_item(pool_leisure)
         if act_am:
-            add_route(current_loc, act_am["name"], "tomorrow 10:00")
+            act_am_coords = (act_am["lat"], act_am["lon"])
+            add_route(curr_name, curr_coords, act_am["name"], act_am_coords, "tomorrow 09:30", "Ausflug am Morgen")
+            add_visual_tracking(act_am)
             steps.append({ "type": "activity", "data": act_am })
-            current_loc = act_am["name"]
+            curr_name = act_am["name"]
+            curr_coords = act_am_coords
         
         # Nachmittag
         act_pm = get_item(pool_museums)
         if act_pm:
-            add_route(current_loc, act_pm["name"], "tomorrow 14:00")
+            act_pm_coords = (act_pm["lat"], act_pm["lon"])
+            add_route(curr_name, curr_coords, act_pm["name"], act_pm_coords, "tomorrow 14:00", "Kultur am Nachmittag")
             steps.append({ "type": "activity", "data": act_pm })
-            current_loc = act_pm["name"]
+            curr_name = act_pm["name"]
+            curr_coords = act_pm_coords
         
-        # Abend
+        # Abendessen & RÜCKWEG
         act_eve = get_item(pool_food)
         if act_eve:
-            add_route(current_loc, act_eve["name"], "tomorrow 19:00")
+            act_eve_coords = (act_eve["lat"], act_eve["lon"])
+            add_route(curr_name, curr_coords, act_eve["name"], act_eve_coords, "tomorrow 19:00", "Abendessen")
             steps.append({ "type": "activity", "data": act_eve })
+            
+            # 🔥 ZWINGENDER RÜCKWEG 🔥
+            add_route(act_eve["name"], act_eve_coords, base_name, base_coords, "tomorrow 21:00", "Zurück zur Unterkunft")
+        else:
+             add_route(curr_name, curr_coords, base_name, base_coords, "tomorrow 20:00", "Zurück zur Unterkunft")
 
-    # --- LETZTER TAG: Abreise ---
-    steps.append({ "type": "header", "title": f"📅 Tag {days}: Abschied & Heimreise" })
+    # === LETZTER TAG ===
+    steps.append({ "type": "header", "title": f"📅 Tag {days}: Heimreise" })
     
-    # Wir starten wieder am Hotel
-    current_loc = base_location
+    curr_name = base_name
+    curr_coords = base_coords
     
-    # Noch eine letzte kleine Aktivität?
-    last_act = get_item(pool_leisure)
+    last_act = get_item(pool_leisure) or get_item(pool_museums)
     if last_act:
-        add_route(current_loc, last_act["name"], "tomorrow 10:00")
+        last_coords = (last_act["lat"], last_act["lon"])
+        add_route(curr_name, curr_coords, last_act["name"], last_coords, "tomorrow 10:00", "Letzter Ausflug")
+        add_visual_tracking(last_act)
         steps.append({ "type": "activity", "data": last_act })
-        # Für die Rückreise tun wir so, als würden wir vom Hotel abreisen (Gepäck holen)
+        curr_name = last_act["name"]
+        curr_coords = last_coords
     
-    # Rückreise: Hotel -> Heimatort
-    add_route(base_location, start, "tomorrow 16:00", "Rückreise")
+    # Heimreise
+    add_route(curr_name, curr_coords, start, start_coords, "tomorrow 15:00", "Heimreise")
 
-    # ZUSAMMENFASSUNG
     result = {
         "type": "multi_step_plan",
-        "intro": f"Ich habe die komplette Route für {days} Tage inkl. aller Wege berechnet:",
+        "intro": intro_text,
         "steps": steps
     }
     

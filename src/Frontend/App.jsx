@@ -247,6 +247,8 @@ export default function App() {
   const [socket, setSocket] = useState(null);
   const [showMobileChat, setShowMobileChat] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
+
+  const [activeDay, setActiveDay] = useState(1);
   
   const mapContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -270,11 +272,9 @@ export default function App() {
     return () => ws.close();
   }, []);
 
-  // 2. Leaflet Karte initialisieren (DAS HAT GEFEHLT!)
+ // 2. Leaflet Karte initialisieren (ROBUST)
   useEffect(() => {
-    if (!mapContainerRef.current) return;
-    
-    // Checken ob Leaflet CSS schon da ist
+    // A) Ressourcen laden
     if (!document.getElementById('leaflet-css')) {
         const link = document.createElement('link');
         link.id = 'leaflet-css';
@@ -282,8 +282,6 @@ export default function App() {
         link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
         document.head.appendChild(link);
     }
-
-    // Checken ob Leaflet JS schon da ist
     if (!document.getElementById('leaflet-js')) {
         const script = document.createElement('script');
         script.id = 'leaflet-js';
@@ -291,28 +289,36 @@ export default function App() {
         document.head.appendChild(script);
     }
     
-    // Warten bis L verfügbar ist
+    // B) Karte starten
     const checkL = setInterval(() => {
-        if (window.L) {
+        // Warten bis Leaflet geladen UND der Container im HTML verfügbar ist
+        if (window.L && mapContainerRef.current) {
             clearInterval(checkL);
             
-            // Map erstellen (falls noch nicht da)
-            if (!mapInstanceRef.current) {
+            // 🔥 FIX: Alte Karte sauber entfernen, bevor wir eine neue bauen!
+            // Das löst das Problem mit der weißen/leeren Karte.
+            if (mapInstanceRef.current) {
+                mapInstanceRef.current.remove();
+                mapInstanceRef.current = null;
+            }
+
+            try {
                 const map = window.L.map(mapContainerRef.current).setView([47.5162, 10.1936], 11);
                 window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
                 mapInstanceRef.current = map;
+            } catch (e) {
+                console.error("Fehler beim Karten-Start:", e);
             }
         }
     }, 100);
 
-    return () => {
-        // Cleanup beim Unmount (optional)
-        // mapInstanceRef.current?.remove(); 
-    };
+    // Cleanup beim Verlassen
+    return () => clearInterval(checkL);
   }, []);
 
   // 3. Effect: Lauscht auf Nachrichten und zeichnet Routen
- useEffect(() => {
+ // 3. Effect: Lauscht auf Nachrichten und zeichnet Routen
+  useEffect(() => {
     const lastMsg = messages[messages.length - 1];
     if (!lastMsg || lastMsg.sender !== 'ai' || !mapInstanceRef.current) return;
 
@@ -329,54 +335,54 @@ export default function App() {
             const routesToDraw = [];
             const markersMap = new Map(); 
 
+            // 🔥 FIX: parseFloat nutzen, um Abstürze bei Strings zu verhindern
             const addMarker = (lat, lon, type, name) => {
-                const key = `${lat.toFixed(5)},${lon.toFixed(5)}`;
+                const nLat = parseFloat(lat);
+                const nLon = parseFloat(lon);
+                if (isNaN(nLat) || isNaN(nLon)) return;
+
+                const key = `${nLat.toFixed(5)},${nLon.toFixed(5)}`;
                 const existing = markersMap.get(key);
+                
                 if (type === 'activity') {
-                    markersMap.set(key, { pos: [lat, lon], type, name });
+                    markersMap.set(key, { pos: [nLat, nLon], type, name });
                     return;
                 }
                 if (existing && existing.type === 'activity') return; 
                 if (type === 'transfer') {
-                     markersMap.set(key, { pos: [lat, lon], type, name });
+                     markersMap.set(key, { pos: [nLat, nLon], type, name });
                      return;
                 }
                 if (!existing) {
-                    markersMap.set(key, { pos: [lat, lon], type, name });
+                    markersMap.set(key, { pos: [nLat, nLon], type, name });
                 }
             };
 
-            // --- NEU: INTELLIGENTE FARB-LOGIK ---
             const processLegs = (legs, stepLabel) => {
                 const label = (stepLabel || '').toLowerCase();
                 
                 legs.forEach((leg, index) => {
-                    let legColor = '#f97316'; // Standard: Orange (für Activities/Zwischenwege)
+                    let legColor = '#f97316'; 
                     const isLast = index === legs.length - 1;
                     const isFirst = index === 0;
 
-                    // Logik für Anreise (Blau -> Orange am Ende)
                     if (label.includes('anreise') || label.includes('hinfahrt')) {
-                        legColor = '#3b82f6'; // Blau
-                        // Ausnahme: Das letzte Stück zu Fuß ist schon der Weg zum Museum
-                        if (isLast && leg.mode === 'WALK') {
-                            legColor = '#f97316'; // Orange
-                        }
+                        legColor = '#3b82f6'; 
+                        if (isLast && leg.mode === 'WALK') legColor = '#f97316';
                     } 
-                    // Logik für Rückreise (Orange am Anfang -> Rot)
                     else if (label.includes('rückreise') || label.includes('rückfahrt')) {
-                        legColor = '#ef4444'; // Rot
-                        // Ausnahme: Das erste Stück zu Fuß ist noch der Weg vom Museum weg
-                        if (isFirst && leg.mode === 'WALK') {
-                            legColor = '#f97316'; // Orange
-                        }
+                        legColor = '#ef4444'; 
+                        if (isFirst && leg.mode === 'WALK') legColor = '#f97316';
+                    }
+
+                    if (label.includes('route') || leg.line === 'Wanderweg') {
+                        legColor = '#16a34a'; 
                     }
 
                     if (leg.geometry) {
                         routesToDraw.push({ points: decodePolyline(leg.geometry), color: legColor });
                     }
                     
-                    // Marker sammeln
                     if (leg.from_coords) addMarker(leg.from_coords[0], leg.from_coords[1], 'transfer', leg.from);
                     if (leg.stops) leg.stops.forEach(s => addMarker(s.lat, s.lon, 'stop', s.name));
                     if (leg.to_coords) addMarker(leg.to_coords[0], leg.to_coords[1], 'transfer', leg.to);
@@ -385,7 +391,7 @@ export default function App() {
 
             // --- DATEN VERARBEITEN ---
             if (data.legs) {
-                processLegs(data.legs, 'anreise'); // Single Trip = Anreise Logik
+                processLegs(data.legs, 'anreise'); 
             } 
             else if (data.type === 'activity_list') {
                  data.items.forEach(item => {
@@ -393,15 +399,20 @@ export default function App() {
                  });
             }
             else if (data.type === 'multi_step_plan') {
+                let currentDayCount = 0; 
+
                 data.steps.forEach((step, idx) => {
+                    if (step.type === 'header') {
+                        currentDayCount++;
+                    }
+
+                    // 🔥 FILTER: Nur aktiven Tag zeichnen 🔥
+                    if (currentDayCount !== activeDay) return; 
+
                     if (step.type === 'trip' && step.data.legs) {
-                        // Wir übergeben das Label ("Anreise", "Rückreise") an die Logik
                         let smartLabel = step.label || 'weiterfahrt';
-                        
-                        // Fallback falls Label fehlt
                         if (idx === 0) smartLabel = 'anreise';
                         if (idx === data.steps.length - 1) smartLabel = 'rückreise';
-
                         processLegs(step.data.legs, smartLabel);
                     }
                     if (step.type === 'activity' && step.data.lat && step.data.lon) {
@@ -455,7 +466,7 @@ export default function App() {
     } catch (e) {
         console.error("Map Draw Error:", e);
     }
-  }, [messages]);
+  }, [messages, activeDay]); // Wichtig: activeDay hier drin lassen!
 
   // 4. Scroll to Bottom
   useEffect(() => {
@@ -466,6 +477,8 @@ export default function App() {
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
+
+    setActiveDay(1);
 
     const userText = input;
     setInput('');
@@ -514,7 +527,11 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-4">
           {messages.map((msg) => <ChatMessage key={msg.id} msg={msg} />)}
-          {isLoading && <div className="text-slate-500 text-sm ml-4">KIRA denkt nach... <Loader2 className="inline animate-spin"/></div>}
+          {isLoading && (
+            <div className="text-slate-500 text-sm ml-4">
+              KIRA denkt nach... <Loader2 className="inline animate-spin"/>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
 
@@ -526,7 +543,9 @@ export default function App() {
               placeholder="Reise von Kempten nach..."
               className="flex-1 bg-slate-100 rounded-2xl py-3 pl-5 pr-4 focus:outline-none"
             />
-            <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl"><Send size={18} /></button>
+            <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl">
+              <Send size={18} />
+            </button>
           </form>
           <div className="flex gap-2">
             <button onClick={handleDemoClick} className="text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded font-bold">
@@ -538,14 +557,64 @@ export default function App() {
 
       {/* Rechte Seite: Karte */}
       <div className="flex-1 relative bg-slate-50 h-full flex flex-col p-6">
-        {!showMobileChat && <button onClick={() => setShowMobileChat(true)} className="absolute top-4 left-4 z-30 bg-white p-2 rounded shadow"><Menu/></button>}
         
-        <div className="rounded-3xl overflow-hidden shadow-2xl border border-slate-200 bg-white h-full">
+        {/* 1. DIE KARTE (Liegt unten, z-0) */}
+        <div className="rounded-3xl overflow-hidden shadow-2xl border border-slate-200 bg-white h-full relative z-0">
           <div ref={mapContainerRef} className="w-full h-full" />
         </div>
+
+        {/* 2. MENU BUTTON (Liegt drüber) */}
+        {!showMobileChat && (
+          <button 
+            onClick={() => setShowMobileChat(true)} 
+            className="absolute top-4 left-4 z-[1000] bg-white p-2 rounded-xl shadow-md border border-slate-100 hover:bg-slate-50 transition-colors"
+          >
+            <Menu className="text-slate-600"/>
+          </button>
+        )}
+        
+        {/* 3. TAG-AUSWAHL BUTTONS (Liegen ganz oben, z-1000) */}
+        {(() => {
+            const lastMsg = messages[messages.length - 1];
+            if (lastMsg && lastMsg.sender === 'ai') {
+                try {
+                    const cleanText = lastMsg.text.replace(/```json/g, '').replace(/```/g, '').trim();
+                    if (cleanText.startsWith('{')) {
+                        const data = JSON.parse(cleanText);
+                        
+                        if (data.type === 'multi_step_plan') {
+                            const totalDays = data.steps.filter(s => s.type === 'header').length;
+                            
+                            if (totalDays > 1) {
+                                return (
+                                    <div className="absolute top-8 left-1/2 transform -translate-x-1/2 z-[1000] bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-xl border border-slate-200/50 flex gap-1">
+                                        {Array.from({ length: totalDays }, (_, i) => i + 1).map(day => (
+                                            <button
+                                                key={day}
+                                                onClick={() => setActiveDay(day)}
+                                                className={`px-4 py-2 rounded-xl text-sm font-bold transition-all shadow-sm ${
+                                                    activeDay === day 
+                                                    ? 'bg-slate-800 text-white scale-105' 
+                                                    : 'bg-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                                                }`}
+                                            >
+                                                Tag {day}
+                                            </button>
+                                        ))}
+                                    </div>
+                                );
+                            }
+                        }
+                    }
+                } catch (e) { }
+            }
+            return null;
+        })()}
+        
       </div>
 
-      <FilterPanel isOpen={showFilters} onClose={() => setShowFilters(false)}/>
     </div>
   );
+
+  
 }
