@@ -29,6 +29,8 @@ query PlanTrip(
         }
         from { name lat lon }
         to { name lat lon }
+        legGeometry { points }
+        intermediateStops { name lat lon }
       }
     }
   }

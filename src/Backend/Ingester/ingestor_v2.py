@@ -27,10 +27,10 @@ DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "/data/bayerncloud")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
 # Azure OpenAI Specifics
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_API_KEY", os.getenv("AZURE_OPENAI_KEY", ""))
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "")
-AZURE_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", os.getenv("AZURE_API_VERSION", ""))
+AZURE_OPENAI_KEY_EMB = os.getenv("AZURE_OPENAI_API_KEY_EMB", "")
+AZURE_OPENAI_ENDPOINT_EMB = os.getenv("AZURE_OPENAI_ENDPOINT_EMB", "")
+AZURE_DEPLOYMENT_NAME_EMB = os.getenv("AZURE_DEPLOYMENT_NAME_EMB", "")
+AZURE_API_VERSION_EMB = os.getenv("AZURE_OPENAI_API_VERSION_EMB", "")
 
 # text-embedding-3-large uses 3072 dimensions
 EMBED_DIM = int(os.getenv("EMBED_DIM", "3072"))
@@ -40,13 +40,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- LlamaIndex Settings ---
-logger.info(f"Lade Azure OpenAI Embedding Modell: {AZURE_DEPLOYMENT_NAME}...")
+logger.info(f"Lade Azure OpenAI Embedding Modell: {AZURE_DEPLOYMENT_NAME_EMB}...")
 embed_model = AzureOpenAIEmbedding(
-    model="text-embedding-3-large",
-    deployment_name=AZURE_DEPLOYMENT_NAME,
-    api_key=AZURE_OPENAI_KEY,
-    azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    api_version=AZURE_API_VERSION,
+    model=AZURE_DEPLOYMENT_NAME_EMB,
+    deployment_name=AZURE_DEPLOYMENT_NAME_EMB,
+    api_key=AZURE_OPENAI_KEY_EMB,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT_EMB,
+    api_version=AZURE_API_VERSION_EMB,
 )
 
 Settings.embed_model = embed_model

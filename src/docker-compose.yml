@@ -117,6 +117,8 @@ services:
       - opensearch
     restart: "no"
     profiles: [ "ingest" ]
+    env_file:
+    - .env
     
  
 

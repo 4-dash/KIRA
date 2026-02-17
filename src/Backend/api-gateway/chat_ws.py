@@ -41,11 +41,11 @@ TOOLS: List[Dict[str, Any]] = [
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "time_str": {"type": "string", "description": "e.g. 'tomorrow 08:00'"}
+                    "time_str": {"type": "string", "description": "e.g. 'tomorrow 08:00'"},
                 },
-                "required": ["start", "end"]
-            }
-        }
+                "required": ["start", "end"],
+            },
+        },
     },
     {
         "type": "function",
@@ -56,11 +56,11 @@ TOOLS: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "location": {"type": "string"},
-                    "interest": {"type": "string"}
+                    "interest": {"type": "string"},
                 },
-                "required": ["location"]
-            }
-        }
+                "required": ["location"],
+            },
+        },
     },
     {
         "type": "function",
@@ -72,55 +72,45 @@ TOOLS: List[Dict[str, Any]] = [
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "interest": {"type": "string", "description": "Type of activity, e.g. 'Museums' or 'Food'"}
+                    "interest": {"type": "string", "description": "Type of activity, e.g. 'Museums' or 'Food'"},
+                    "num_stops": {"type": "integer", "description": "How many intermediate POI stops to add", "default": 2},
                 },
-                "required": ["start", "end", "interest"]
-            }
-        }
+                "required": ["start", "end", "interest"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "plan_multiday_trip",
-            "description": "Generates a full itinerary for a specific number of days.",
+            "description": "Plans a MULTI-DAY itinerary (e.g. 'Weekend', '3 days').",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "days": {
-                        "type": "integer", 
-                        "description": "Number of days. Extract from user prompt (e.g. 'weekend' = 2). Default to 4."
-                    }
+                    "days": {"type": "integer"},
                 },
-                "required": ["start", "end"]
-            }
-        }
+                "required": ["start", "end"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "find_best_city",
-            "description": "Finds the best matching city in Allgäu for specific interests. Use FIRST if user has no destination.",
+            "description": "Internal Tool: Finds a city if the user didn't specify one.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The interests, e.g. 'Quad activities'"}
-                },
-                "required": ["query"]
-            }
-        }
-    }
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
-
-# --- SYSTEM PROMPT (from Eric's branch) ---
-SYSTEM_PROMPT = """
-Du bist KIRA. 
-1. Wenn der User keine Zielstadt nennt, nutze 'find_best_city' um sie zu finden. 
-2. Wenn der User keinen Startort nennt, nimm 'Fischen' als Standard an. 
-3. Nutze DANN 'plan_multiday_trip' um den Plan zu erstellen. 
-4. Antworte bei Tools NUR mit dem JSON.
+SYSTEM_PROMPT = """Du bist KIRA. Nutze Tools wenn der User nach Routen/Trips/Aktivitäten fragt.
+WICHTIG: Antworte bei Tools NUR mit dem JSON.
 """
 
 
@@ -139,6 +129,10 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
             print(f"📩 User: {user_text}")
             messages.append({"role": "user", "content": user_text})
 
+            # If we send a tool JSON payload to the frontend, we must stop the loop
+            # (Match behavior of the old source branch: no additional assistant summary after tool output).
+            should_break_loop = False
+
             # Main Loop (Multi-Step)
             for _ in range(5):
                 response = client.chat.completions.create(
@@ -156,10 +150,10 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                         func_name = tc.function.name
                         args_str = tc.function.arguments or "{}"
                         print(f"⚙️ Tool Call: {func_name}")
-                        
+
                         try:
                             args = json.loads(args_str)
-                        except:
+                        except Exception:
                             args = {}
 
                         result_str = ""
@@ -168,54 +162,69 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                             result_str = plan_journey_logic(
                                 start=args.get("start", ""),
                                 end=args.get("end", ""),
-                                time_str=args.get("time_str", "tomorrow 07:30")
+                                time_str=args.get("time_str", "tomorrow 07:30"),
                             )
                             await websocket.send_text(result_str)
+
+                            # Tool payload sent -> stop the assistant loop (frontend renders JSON)
+                            should_break_loop = True
 
                         elif func_name == "plan_activities":
                             result_str = plan_activities_logic(
                                 location=args.get("location", ""),
-                                interest=args.get("interest", "")
+                                interest=args.get("interest", ""),
                             )
                             await websocket.send_text(result_str)
+
+                            # Tool payload sent -> stop the assistant loop (frontend renders JSON)
+                            should_break_loop = True
 
                         elif func_name == "plan_multiday_trip":
                             result_str = plan_multiday_trip_logic(
                                 start=args.get("start", ""),
                                 end=args.get("end", ""),
-                                days=int(args.get("days", 4) or 4)
+                                days=int(args.get("days", 4) or 4),
                             )
                             await websocket.send_text(result_str)
+
+                            # Tool payload sent -> stop the assistant loop (frontend renders JSON)
+                            should_break_loop = True
 
                         elif func_name == "plan_complete_trip":
                             result_str = plan_complete_trip_logic(
                                 start=args.get("start", ""),
                                 end=args.get("end", ""),
                                 interest=args.get("interest", ""),
-                                num_stops=int(args.get("num_stops", 2) or 2)
+                                num_stops=int(args.get("num_stops", 2) or 2),
                             )
                             await websocket.send_text(result_str)
 
+                            # Tool payload sent -> stop the assistant loop (frontend renders JSON)
+                            should_break_loop = True
+
                         elif func_name == "find_best_city":
-                            result_str = find_best_city_logic(
-                                query=args.get("query", "")
-                            )
+                            result_str = find_best_city_logic(query=args.get("query", ""))
                             print(f"   📍 Stadt gefunden: {result_str}")
                             # Internal step, do NOT send to frontend directly
 
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result_str,
-                        })
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tc.id,
+                                "content": result_str,
+                            }
+                        )
+
+                    # If we already sent a tool payload to the frontend, stop here.
+                    if should_break_loop:
+                        break
 
                 else:
-                    # Final text response
+                    # Final text response (only when NO tool was used)
                     final_text = msg.content
                     if final_text:
-                        # Wrap in JSON if the frontend expects it, or send raw text
-                        # Eric's api.py sent raw text at the end.
                         await websocket.send_text(final_text)
                     break
+
     except WebSocketDisconnect:
         print("❌ Frontend getrennt")
