@@ -8,7 +8,7 @@ import asyncio
 import math
 from anyio import to_thread
 
-from client import TripRequest, TripResponse, call_trip_planner
+from Backend.api_gateway.client import TripRequest, TripResponse, call_trip_planner
 
 app = FastAPI()
 
