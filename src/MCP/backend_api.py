@@ -10,6 +10,10 @@ from datetime import datetime
 from openai import AzureOpenAI
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+from opensearchpy import OpenSearch, RequestsHttpConnection
+import uuid
 
 # Konfiguration
 load_dotenv()
@@ -57,13 +61,46 @@ async def lifespan(app: FastAPI):
         } for tool in tools_result.tools]
         
         mcp_session = session
-        print(f"✅ MCP Connected! Loaded {len(openai_tools)} tools.")
+        
+        # 🔥 NEU: Druckt die exakten Tool-Namen ins Terminal!
+        tool_names = [tool.name for tool in tools_result.tools]
+        print(f"✅ MCP Connected! Loaded {len(openai_tools)} tools: {', '.join(tool_names)}")
+        
         yield
     finally:
         print("🛑 Shutting down MCP Client...")
         await stack.aclose()
 
 app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In Produktion anpassen auf deine Frontend-URL (z.B. localhost:3000)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- NEU: DATENBANK VERBINDUNG FÜR GESPEICHERTE TRIPS ---
+os_client = OpenSearch(
+    hosts=[{'host': 'localhost', 'port': 9200}],
+    use_ssl=False, verify_certs=False, connection_class=RequestsHttpConnection
+)
+
+@app.post("/api/save_trip")
+async def save_trip(request: Request):
+    try:
+        trip_data = await request.json()
+        trip_id = str(uuid.uuid4()) # Generiert eine einmalige ID
+        
+        # Speichert die Daten in einem neuen Index 'saved-trips'
+        os_client.index(index="saved-trips", id=trip_id, body=trip_data)
+        
+        print(f"💾 Trip {trip_id} erfolgreich in DB gespeichert!")
+        return {"status": "success", "id": trip_id}
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.websocket("/chat")
 async def websocket_endpoint(websocket: WebSocket):

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders, Train, Bus, Footprints, Clock, ArrowRight, Flag } from 'lucide-react';
+import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders, Train, Bus, Footprints, Clock, ArrowRight, Flag, Save, Check, Download, Upload} from 'lucide-react';
 
 // --- Konfiguration & Mock-Daten ---
 
@@ -13,6 +13,7 @@ const INITIAL_MESSAGE = {
 
 const ChatMessage = ({ msg }) => {
   const isAi = msg.sender === 'ai';
+  const [isSaved, setIsSaved] = useState(false);
   
   let tripData = null;
   let activityData = null; 
@@ -49,6 +50,45 @@ const ChatMessage = ({ msg }) => {
         }
     }
   }
+
+  const handleSaveTrip = async () => {
+    const dataToSave = multiStepData || tripData;
+    if (!dataToSave) return;
+    
+    try {
+        const response = await fetch('http://localhost:8000/api/save_trip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                saved_at: new Date().toISOString(),
+                plan: dataToSave
+            })
+        });
+        if (response.ok) setIsSaved(true);
+    } catch (e) {
+        console.error("Fehler beim Speichern der Reise:", e);
+    }
+  };
+
+  const handleExportTrip = () => {
+    const dataToExport = multiStepData || tripData;
+    if (!dataToExport) return;
+    
+    // JSON in einen Text-String umwandeln und als Blob verpacken
+    const dataStr = JSON.stringify(dataToExport, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    // Einen unsichtbaren Link erstellen, anklicken und wieder entfernen
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `KIRA_Reiseplan_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className={`flex w-full mb-4 ${isAi ? 'justify-start' : 'justify-end'}`}>
       <div className={`flex max-w-[95%] md:max-w-[85%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
@@ -104,6 +144,33 @@ const ChatMessage = ({ msg }) => {
                         )}
                     </div>
                 ))}
+            </div>
+          )}
+            {/* 🔥 NEU: Container für BEIDE Speichern-Buttons */}
+          {(tripData || multiStepData) && (
+            <div className="flex flex-wrap gap-2 mt-4 ml-1">
+                {/* 1. Button: In Datenbank speichern */}
+                <button 
+                    onClick={handleSaveTrip}
+                    disabled={isSaved}
+                    className={`px-4 py-2 w-fit rounded-xl text-sm font-bold flex items-center gap-2 transition-all ${
+                        isSaved 
+                        ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' 
+                        : 'bg-slate-800 text-white hover:bg-slate-700 shadow-md hover:shadow-lg'
+                    }`}
+                >
+                    {isSaved ? <Check size={16} /> : <Save size={16} />}
+                    {isSaved ? 'In Datenbank gespeichert' : 'In DB speichern'}
+                </button>
+
+                {/* 2. Button: Lokal als Datei herunterladen */}
+                <button 
+                    onClick={handleExportTrip}
+                    className="px-4 py-2 w-fit rounded-xl text-sm font-bold flex items-center gap-2 transition-all bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 shadow-sm hover:shadow-md"
+                >
+                    <Download size={16} />
+                    Als JSON exportieren
+                </button>
             </div>
           )}
         </div>
@@ -249,11 +316,47 @@ export default function App() {
   const [showFilters, setShowFilters] = useState(false);
 
   const [activeDay, setActiveDay] = useState(1);
+  const [isMapReady, setIsMapReady] = useState(false);
   
   const mapContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const routeLayerRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // 🔥 NEU: Import-Logik
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+  const handleFileChange = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const content = e.target.result;
+            // Kurzer Test, ob es wirklich JSON ist
+            JSON.parse(content); 
+            
+            // Wir tun so, als hätte die KI diese Nachricht gerade geschrieben.
+            // Dadurch greifen all deine bestehenden Karten- und Render-Funktionen!
+            setMessages(prev => [...prev, { 
+                id: Date.now(), 
+                sender: 'ai', 
+                text: content 
+            }]);
+            
+            // Setzt den ActiveDay wieder auf 1, falls es ein Mehrtagestrip ist
+            setActiveDay(1);
+        } catch (err) {
+            console.error("Invalid JSON file", err);
+            alert("Die hochgeladene Datei ist kein gültiger KIRA-Reiseplan.");
+        }
+    };
+    reader.readAsText(file);
+    event.target.value = ''; // Feld zurücksetzen, damit man die gleiche Datei nochmal laden kann
+  };
 
   // 1. WebSocket Verbindung herstellen
   useEffect(() => {
@@ -302,10 +405,20 @@ export default function App() {
                 mapInstanceRef.current = null;
             }
 
+            routeLayerRef.current = null;
+
+            mapContainerRef.current.innerHTML = "";
+            if (mapContainerRef.current._leaflet_id) {
+                mapContainerRef.current._leaflet_id = null;
+            }
+
             try {
                 const map = window.L.map(mapContainerRef.current).setView([47.5162, 10.1936], 11);
                 window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
                 mapInstanceRef.current = map;
+
+                setIsMapReady(true);
+                setTimeout(() => { map.invalidateSize(); }, 200);
             } catch (e) {
                 console.error("Fehler beim Karten-Start:", e);
             }
@@ -317,16 +430,18 @@ export default function App() {
   }, []);
 
   // 3. Effect: Lauscht auf Nachrichten und zeichnet Routen
- // 3. Effect: Lauscht auf Nachrichten und zeichnet Routen
+// 3. Effect: Lauscht auf Nachrichten und zeichnet Routen & Icons
   useEffect(() => {
     const lastMsg = messages[messages.length - 1];
-    if (!lastMsg || lastMsg.sender !== 'ai' || !mapInstanceRef.current) return;
+    // Sicherheits-Check: Nur laufen, wenn Karte bereit ist
+    if (!lastMsg || lastMsg.sender !== 'ai' || !mapInstanceRef.current || !isMapReady) return;
 
     try {
         const cleanText = lastMsg.text.replace(/```json/g, '').replace(/```/g, '').trim();
         if (cleanText.startsWith('{')) {
             const data = JSON.parse(cleanText);
             
+            // Layer-Management
             if (!routeLayerRef.current) {
                 routeLayerRef.current = window.L.layerGroup().addTo(mapInstanceRef.current);
             }
@@ -335,8 +450,42 @@ export default function App() {
             const routesToDraw = [];
             const markersMap = new Map(); 
 
-            // 🔥 FIX: parseFloat nutzen, um Abstürze bei Strings zu verhindern
-            const addMarker = (lat, lon, type, name) => {
+            // --- HELPER: ICONS ---
+            const getIconHtml = (category) => {
+                const cat = (category || '').toLowerCase();
+                let iconPath = '';
+                let bgColor = 'bg-slate-800'; 
+
+                if (cat.includes('museum') || cat.includes('kultur')) {
+                    iconPath = '<path d="M3 22v-8c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v8M3 6l9-4 9 4M12 6v7M8 6v7M16 6v7"/>';
+                    bgColor = 'bg-indigo-600';
+                } 
+                else if (cat.includes('restaurant') || cat.includes('essen') || cat.includes('gasthof')) {
+                    iconPath = '<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2M15 22v-8H7v8M19 8V2M22 8V2M19 14v8"/>';
+                    bgColor = 'bg-orange-500';
+                }
+                else if (cat.includes('wandern') || cat.includes('natur') || cat.includes('berg')) {
+                    iconPath = '<path d="m8 3 4 8 5-5 5 15H2L8 3z"/>';
+                    bgColor = 'bg-emerald-600';
+                }
+                else if (cat.includes('hotel') || cat.includes('unterkunft')) {
+                    iconPath = '<path d="M2 4v16M2 8h18a2 2 0 0 1 2 2v10M2 17h20M6 8v9"/>';
+                    bgColor = 'bg-blue-600';
+                }
+                else {
+                    iconPath = '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>';
+                }
+
+                return `
+                    <div class="${bgColor} w-8 h-8 rounded-full flex items-center justify-center shadow-md border-2 border-white text-white">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            ${iconPath}
+                        </svg>
+                    </div>
+                `;
+            };
+
+            const addMarker = (lat, lon, type, name, category) => { 
                 const nLat = parseFloat(lat);
                 const nLon = parseFloat(lon);
                 if (isNaN(nLat) || isNaN(nLon)) return;
@@ -345,17 +494,11 @@ export default function App() {
                 const existing = markersMap.get(key);
                 
                 if (type === 'activity') {
-                    markersMap.set(key, { pos: [nLat, nLon], type, name });
+                    markersMap.set(key, { pos: [nLat, nLon], type, name, category });
                     return;
                 }
                 if (existing && existing.type === 'activity') return; 
-                if (type === 'transfer') {
-                     markersMap.set(key, { pos: [nLat, nLon], type, name });
-                     return;
-                }
-                if (!existing) {
-                    markersMap.set(key, { pos: [nLat, nLon], type, name });
-                }
+                markersMap.set(key, { pos: [nLat, nLon], type, name, category: null });
             };
 
             const processLegs = (legs, stepLabel) => {
@@ -374,13 +517,36 @@ export default function App() {
                         legColor = '#ef4444'; 
                         if (isFirst && leg.mode === 'WALK') legColor = '#f97316';
                     }
-
                     if (label.includes('route') || leg.line === 'Wanderweg') {
                         legColor = '#16a34a'; 
                     }
 
-                    if (leg.geometry) {
-                        routesToDraw.push({ points: decodePolyline(leg.geometry), color: legColor });
+                    // 🔥 FIX 1: Geometrie flexibel finden (egal ob 'geometry' oder 'legGeometry.points')
+                    let rawGeo = leg.geometry || leg.legGeometry;
+                    // Falls OTP ein Objekt schickt: { points: "..." }
+                    if (rawGeo && typeof rawGeo === 'object' && rawGeo.points) {
+                        rawGeo = rawGeo.points;
+                    }
+
+                    if (rawGeo) {
+                        let points = [];
+                        if (typeof rawGeo === 'string') {
+                            points = decodePolyline(rawGeo);
+                        } else if (Array.isArray(rawGeo)) {
+                            // 🔥 FIX 2: Koordinaten-Check (Afrika-Fix) 🔥
+                            // GeoJSON ist [Lon, Lat], Leaflet will [Lat, Lon].
+                            // Wenn wir Koordinaten nahe Somalia (Lat < 40, Lon > 40) sehen, tauschen wir sie.
+                            points = rawGeo.map(pt => {
+                                if (pt[0] < 40 && pt[1] > 40) {
+                                    return [pt[1], pt[0]]; // Tauschen!
+                                }
+                                return pt;
+                            });
+                        }
+                        
+                        if (points.length > 0) {
+                            routesToDraw.push({ points: points, color: legColor });
+                        }
                     }
                     
                     if (leg.from_coords) addMarker(leg.from_coords[0], leg.from_coords[1], 'transfer', leg.from);
@@ -395,19 +561,19 @@ export default function App() {
             } 
             else if (data.type === 'activity_list') {
                  data.items.forEach(item => {
-                     if (item.lat && item.lon) addMarker(item.lat, item.lon, 'activity', item.name);
+                     if (item.lat && item.lon) addMarker(item.lat, item.lon, 'activity', item.name, item.category);
                  });
             }
             else if (data.type === 'multi_step_plan') {
+                // 🔥 FIX: Prüfen, ob dieser Plan überhaupt in Tage unterteilt ist
+                const hasHeaders = data.steps.some(s => s.type === 'header');
                 let currentDayCount = 0; 
-
+                
                 data.steps.forEach((step, idx) => {
-                    if (step.type === 'header') {
-                        currentDayCount++;
-                    }
-
-                    // 🔥 FILTER: Nur aktiven Tag zeichnen 🔥
-                    if (currentDayCount !== activeDay) return; 
+                    if (step.type === 'header') currentDayCount++;
+                    
+                    // 🔥 FIX: Nur filtern, wenn es wirklich Tages-Überschriften gibt!
+                    if (hasHeaders && currentDayCount !== activeDay) return; 
 
                     if (step.type === 'trip' && step.data.legs) {
                         let smartLabel = step.label || 'weiterfahrt';
@@ -416,48 +582,44 @@ export default function App() {
                         processLegs(step.data.legs, smartLabel);
                     }
                     if (step.type === 'activity' && step.data.lat && step.data.lon) {
-                        addMarker(step.data.lat, step.data.lon, 'activity', step.data.name);
+                        addMarker(step.data.lat, step.data.lon, 'activity', step.data.name, step.data.category);
                     }
                 });
             }
 
             // --- ZEICHNEN ---
-            const allLatLngs = [];
             routesToDraw.forEach(route => {
                 window.L.polyline(route.points, { color: route.color, weight: 5, opacity: 0.8 }).addTo(routeLayerRef.current);
-                allLatLngs.push(...route.points);
             });
 
             markersMap.forEach((pt) => {
-                let color = '#3b82f6'; 
-                let fillColor = '#3b82f6';
-                let radius = 6;
-                let zIndexOffset = 0;
-
                 if (pt.type === 'activity') {
-                    color = '#ffffff';
-                    fillColor = '#f97316'; 
-                    radius = 9;       
-                    zIndexOffset = 1000;
-                } else if (pt.type === 'stop') {
-                    color = '#3b82f6';
-                    fillColor = '#ffffff'; 
-                    radius = 4;
+                    const icon = window.L.divIcon({
+                        className: 'custom-icon', 
+                        html: getIconHtml(pt.category),
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 32], 
+                        popupAnchor: [0, -32]
+                    });
+                    window.L.marker(pt.pos, { icon: icon, zIndexOffset: 1000 }).bindPopup(pt.name).addTo(routeLayerRef.current);
                 } 
-                
-                window.L.circleMarker(pt.pos, {
-                    radius: radius,
-                    fillColor: fillColor,
-                    color: color,
-                    weight: 2,
-                    opacity: 1,
-                    fillOpacity: 1,
-                    zIndexOffset: zIndexOffset
-                }).bindPopup(pt.name).addTo(routeLayerRef.current);
-                
-                allLatLngs.push(pt.pos);
+                else {
+                    window.L.circleMarker(pt.pos, {
+                        radius: 4,
+                        fillColor: '#ffffff',
+                        color: '#3b82f6',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 1
+                    }).bindPopup(pt.name).addTo(routeLayerRef.current);
+                }
             });
 
+            // Zoom anpassen
+            const allLatLngs = [];
+            routesToDraw.forEach(r => allLatLngs.push(...r.points));
+            markersMap.forEach(pt => allLatLngs.push(pt.pos));
+            
             if (allLatLngs.length > 0) {
                 const bounds = window.L.latLngBounds(allLatLngs);
                 mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
@@ -466,7 +628,7 @@ export default function App() {
     } catch (e) {
         console.error("Map Draw Error:", e);
     }
-  }, [messages, activeDay]); // Wichtig: activeDay hier drin lassen!
+  },[messages, activeDay, isMapReady]);
 
   // 4. Scroll to Bottom
   useEffect(() => {
@@ -540,16 +702,27 @@ export default function App() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Reise von Kempten nach..."
+              placeholder="Wohin möchtest du reisen?"
               className="flex-1 bg-slate-100 rounded-2xl py-3 pl-5 pr-4 focus:outline-none"
             />
             <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl">
               <Send size={18} />
             </button>
           </form>
+          
           <div className="flex gap-2">
-            <button onClick={handleDemoClick} className="text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded font-bold">
-              🎫 Demo: Fischen-Sonthofen
+            {/* Der Demo-Button wurde hier komplett entfernt */}
+            
+            {/* Import Button & Verstecktes Input-Feld */}
+            <input 
+                type="file" 
+                accept=".json" 
+                ref={fileInputRef} 
+                onChange={handleFileChange} 
+                style={{ display: 'none' }} 
+            />
+            <button onClick={handleImportClick} className="text-xs bg-slate-200 text-slate-700 px-3 py-1 rounded font-bold flex items-center gap-1 hover:bg-slate-300">
+              <Upload size={14} /> Trip importieren
             </button>
           </div>
         </div>
