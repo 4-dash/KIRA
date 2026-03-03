@@ -40,6 +40,13 @@ services:
       - OPENSEARCH_PORT=9200
       - OPENSEARCH_INDEX=travel-plans
       - OPENSEARCH_POI_INDEX=tourism-data-v-working
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}
+      - AZURE_OPENAI_API_VERSION=${AZURE_OPENAI_API_VERSION}
+      - AZURE_DEPLOYMENT_NAME_EMBED=${AZURE_DEPLOYMENT_NAME_EMBED}
+      - AZURE_API_VERSION_EMBED=${AZURE_API_VERSION_EMBED}
+      - AZURE_EMBED_ENDPOINT=${AZURE_EMBED_ENDPOINT}
+      - EMBED_DIM=${EMBED_DIM}
       
     ports:
       - "8001:8001"
@@ -47,6 +54,8 @@ services:
       - otp
       - opensearch
     restart: unless-stopped
+    env_file:
+      - .env
     
     
   api-gateway:

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 from openai import AzureOpenAI
+import requests
 
 from mcp_tools import (
     find_best_city_logic,
@@ -136,6 +137,7 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
     client = build_azure_client()
     deployment = os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o")
 
+    # IMPORTANT: messages must contain ONLY plain dicts (no SDK/Pydantic objects)
     messages: List[Dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     try:
@@ -158,7 +160,27 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                 )
 
                 msg = response.choices[0].message
-                messages.append(msg)
+
+                # ✅ FIX: Convert SDK message object -> plain dict before storing
+                msg_dict: Dict[str, Any] = {
+                    "role": msg.role,
+                    "content": msg.content,
+                }
+
+                if msg.tool_calls:
+                    msg_dict["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": getattr(tc, "type", "function") or "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ]
+
+                messages.append(msg_dict)
 
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
@@ -173,45 +195,81 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
 
                         result_str = ""
 
+                        def _send_error(message: str) -> None:
+                            # Frontend expects JSON for tool failures
+                            nonlocal result_str
+                            result_str = json.dumps({"type": "error", "message": message})
+
                         if func_name == "get_simple_route":
-                            result_str = plan_journey_logic(
-                                start=args.get("start", ""),
-                                end=args.get("end", ""),
-                                time_str=args.get("time_str", "tomorrow 07:30"),
-                            )
+                            # plan_journey_logic returns a plain route JSON.
+                            # Frontend expects a wrapper event for rendering.
+                            try:
+                                route_str = plan_journey_logic(
+                                    start=args.get("start", ""),
+                                    end=args.get("end", ""),
+                                    time_str=args.get("time_str", "tomorrow 07:30"),
+                                )
+                            except requests.RequestException as e:
+                                _send_error(f"Routing failed: {e}")
+                                await websocket.send_text(result_str)
+                                should_break_loop = True
+                                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
+                                continue
+
+                            try:
+                                route_obj = json.loads(route_str)
+                            except Exception:
+                                route_obj = {"error": "Invalid route JSON", "raw": route_str}
+
+                            result_str = json.dumps({"type": "complete_trip", "trip": route_obj})
                             await websocket.send_text(result_str)
 
                             # Tool payload sent -> stop the assistant loop (frontend renders JSON)
                             should_break_loop = True
 
                         elif func_name == "search_local_places":
-                            result_str = plan_activities_logic(
-                                location=args.get("location", ""),
-                                interest=args.get("interest", ""),
-                            )
+                            try:
+                                result_str = plan_activities_logic(
+                                    location=args.get("location", ""),
+                                    interest=args.get("interest", ""),
+                                )
+                            except requests.RequestException as e:
+                                _send_error(f"Activity search failed: {e}")
                             await websocket.send_text(result_str)
 
                             # Tool payload sent -> stop the assistant loop (frontend renders JSON)
                             should_break_loop = True
 
                         elif func_name == "plan_multiday_trip":
-                            result_str = plan_multiday_trip_logic(
-                                start=args.get("start", ""),
-                                end=args.get("end", ""),
-                                days=int(args.get("days", 4) or 4),
-                            )
+                            try:
+                                result_str = plan_multiday_trip_logic(
+                                    start=args.get("start", ""),
+                                    end=args.get("end", ""),
+                                    days=int(args.get("days", 3) or 3),
+                                    hotel_pref=args.get("hotel_pref", "Hotel Unterkunft Central"),
+                                    activity_pref=args.get("activity_pref", "Wandern Natur Freizeit"),
+                                    food_pref=args.get("food_pref", "Restaurant Gaststätte"),
+                                    culture_pref=args.get("culture_pref", "Museum"),
+                                    avoid_places=args.get("avoid_places", None),
+                                )
+                            except requests.RequestException as e:
+                                _send_error(f"Trip planning failed: {e}")
                             await websocket.send_text(result_str)
 
                             # Tool payload sent -> stop the assistant loop (frontend renders JSON)
                             should_break_loop = True
 
                         elif func_name == "plan_single_day_trip":
-                            result_str = plan_complete_trip_logic(
-                                start=args.get("start", ""),
-                                end=args.get("end", ""),
-                                interest=args.get("interest", ""),
-                                num_stops=int(args.get("num_stops", 2) or 2),
-                            )
+                            try:
+                                result_str = plan_complete_trip_logic(
+                                    start=args.get("start", ""),
+                                    end=args.get("end", ""),
+                                    interest=args.get("interest", ""),
+                                    num_stops=int(args.get("num_stops", 2) or 2),
+                                    avoid_places=args.get("avoid_places", None),
+                                )
+                            except requests.RequestException as e:
+                                _send_error(f"Trip planning failed: {e}")
                             await websocket.send_text(result_str)
 
                             # Tool payload sent -> stop the assistant loop (frontend renders JSON)

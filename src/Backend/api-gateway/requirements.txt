@@ -9,9 +9,4 @@ requests>=2.31.0
 opensearch-py>=2.4.2
 python-dotenv>=1.0.1
 
-# LlamaIndex dependencies 
-llama-index-core
-llama-index-llms-azure-openai
-llama-index-embeddings-huggingface
-llama-index-vector-stores-opensearch
-transformers
+# NOTE: The gateway is intentionally thin; POI retrieval + routing live in trip-planner.

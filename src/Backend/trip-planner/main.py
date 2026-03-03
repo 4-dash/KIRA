@@ -10,6 +10,15 @@ from models import Trip, Day
 from storage_opensearch import store_trip
 from otp_service import extract_primary_transit_leg_from_plan
 
+# KIRA logic (ported from the old MCP agent server)
+from kira_logic import (
+    plan_journey_logic as kira_plan_journey_logic,
+    plan_activities_logic as kira_plan_activities_logic,
+    plan_complete_trip_logic as kira_plan_complete_trip_logic,
+    plan_multiday_trip_logic as kira_plan_multiday_trip_logic,
+    find_best_city_logic as kira_find_best_city_logic,
+)
+
 
 
 app = FastAPI()
@@ -18,6 +27,58 @@ app = FastAPI()
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# New API (used by api-gateway tools)
+# ---------------------------------------------------------------------------
+
+
+@app.post("/journey")
+def journey(payload: dict = Body(...)):
+    return kira_plan_journey_logic(
+        start=payload.get("start", ""),
+        end=payload.get("end", ""),
+        time_str=payload.get("time_str", "tomorrow 07:30"),
+        start_coords_override=payload.get("start_coords_override"),
+        end_coords_override=payload.get("end_coords_override"),
+    )
+
+
+@app.get("/activities/search")
+def activities_search(location: str, interest: str = ""):
+    return kira_plan_activities_logic(location=location, interest=interest)
+
+
+@app.post("/plan/single-day")
+def plan_single_day(payload: dict = Body(...)):
+    return kira_plan_complete_trip_logic(
+        start=payload.get("start", ""),
+        end=payload.get("end", ""),
+        interest=payload.get("interest", ""),
+        num_stops=int(payload.get("num_stops", 2) or 2),
+        avoid_places=payload.get("avoid_places") or [],
+    )
+
+
+@app.post("/plan/multiday")
+def plan_multiday(payload: dict = Body(...)):
+    return kira_plan_multiday_trip_logic(
+        start=payload.get("start", ""),
+        end=payload.get("end", ""),
+        days=int(payload.get("days", 3) or 3),
+        hotel_pref=payload.get("hotel_pref", "Hotel Unterkunft Central"),
+        activity_pref=payload.get("activity_pref", "Wandern Natur Freizeit"),
+        food_pref=payload.get("food_pref", "Restaurant Gaststätte"),
+        culture_pref=payload.get("culture_pref", "Museum"),
+        avoid_places=payload.get("avoid_places") or [],
+    )
+
+
+@app.post("/city/best")
+def best_city(payload: dict = Body(...)):
+    q = payload.get("query", "")
+    return {"city": kira_find_best_city_logic(q)}
 
 
 @app.post("/test/otp-gql")
