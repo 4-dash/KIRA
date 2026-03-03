@@ -161,9 +161,9 @@ def _env(name: str, default: Optional[str] = None) -> str:
 TRIP_PLANNER_URL = _env("TRIP_PLANNER_URL", "http://trip-planner:8001").rstrip("/")
 OPENSEARCH_HOST = _env("OPENSEARCH_HOST", "opensearch")
 OPENSEARCH_PORT = int(_env("OPENSEARCH_PORT", "9200") or "9200")
-OPENSEARCH_USER = _env("OPENSEARCH_USER", "admin")
-OPENSEARCH_PASS = _env("OPENSEARCH_PASS", "admin")
-POI_INDEX = _env("POI_INDEX", "poi-data")
+OPENSEARCH_USER = _env("OPENSEARCH_USER", "")
+OPENSEARCH_PASS = _env("OPENSEARCH_PASS", "")
+POI_INDEX = _env("POI_INDEX", "tourism-data-v-working")
 
 # Globals
 activity_engine = None
@@ -182,7 +182,7 @@ def init_activity_engine():
         # --- OpenSearch client ---
         activity_client = OpenSearch(
             hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
-            http_auth=(OPENSEARCH_USER, OPENSEARCH_PASS),
+            http_auth=(OPENSEARCH_USER, OPENSEARCH_PASS) if OPENSEARCH_USER else None,
             use_ssl=False,
             verify_certs=False,
             connection_class=RequestsHttpConnection,
@@ -409,17 +409,28 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 
-def plan_complete_trip_logic(start: str, end: str, interest: str = "") -> str:
+def plan_complete_trip_logic(
+    start: str,
+    end: str,
+    interest: str = "",
+    num_stops: int = 2,
+    avoid_places: list | None = None,
+) -> str:
     """
     Simple plan for: route + activities.
+    NOTE: num_stops and avoid_places are accepted for compatibility with callers,
+    but are not used by this implementation.
     """
     trip = json.loads(plan_journey_logic(start, end))
     acts = json.loads(plan_activities_logic(end, interest))
-    return json.dumps({
-        "type": "complete_trip",
-        "trip": trip,
-        "activities": acts
-    }, ensure_ascii=False)
+    return json.dumps(
+        {
+            "type": "complete_trip",
+            "trip": trip,
+            "activities": acts,
+        },
+        ensure_ascii=False,
+    )
 
 
 def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:

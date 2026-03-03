@@ -1,5 +1,8 @@
 import json
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 from typing import Any, Dict, List, Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -29,19 +32,19 @@ def build_azure_client() -> AzureOpenAI:
     )
 
 
-# --- TOOLS SCHEMA (Matched to Eric's branch) ---
+# --- TOOLS SCHEMA (ported from source repo Backend/api.py; keep names/behavior) ---
 TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "plan_journey",
-            "description": "Plant eine Reise. MUSS benutzt werden wenn nach Routen gefragt wird.",
+            "name": "get_simple_route",
+            "description": "Berechnet nur eine reine Fahrt von A nach B, ohne Aktivitäten.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "time_str": {"type": "string", "description": "e.g. 'tomorrow 08:00'"},
+                    "time_str": {"type": "string"},
                 },
                 "required": ["start", "end"],
             },
@@ -50,8 +53,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "plan_activities",
-            "description": "Sucht nach Aktivitäten.",
+            "name": "search_local_places",
+            "description": "Sucht NUR eine lose Liste von Orten. GIBT KEINEN Zeitplan zurück. 🔴 VERBOTEN: Nutze dies NIEMALS, wenn der User eine Reise plant oder ändert.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -65,15 +68,16 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "plan_complete_trip",
-            "description": "Plans a full itinerary from A to B including stops at interesting places (museums, restaurants).",
+            "name": "plan_single_day_trip",
+            "description": "Plant oder ändert einen EINZELNEN Tagesausflug (ohne Übernachtung). 🔴 VERBOTEN: Nicht nutzen für Mehrtagesreisen oder wenn der User 'Tag 2' etc. erwähnt!",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
-                    "interest": {"type": "string", "description": "Type of activity, e.g. 'Museums' or 'Food'"},
-                    "num_stops": {"type": "integer", "description": "How many intermediate POI stops to add", "default": 2},
+                    "interest": {"type": "string"},
+                    "num_stops": {"type": "integer"},
+                    "avoid_places": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["start", "end", "interest"],
             },
@@ -83,13 +87,18 @@ TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "plan_multiday_trip",
-            "description": "Plans a MULTI-DAY itinerary (e.g. 'Weekend', '3 days').",
+            "description": "Plant oder ÄNDERT eine komplette Mehrtagesreise. 🟢 PFLICHT: Nutze zwingend dieses Tool, wenn der User 'Tag 2' erwähnt oder einen bestehenden Trip ändern will! Lese start, end, days aus Chat. Nutze activity_pref/culture_pref='Museum' für mehr Museen.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "start": {"type": "string"},
                     "end": {"type": "string"},
                     "days": {"type": "integer"},
+                    "hotel_pref": {"type": "string"},
+                    "activity_pref": {"type": "string"},
+                    "food_pref": {"type": "string"},
+                    "culture_pref": {"type": "string"},
+                    "avoid_places": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["start", "end"],
             },
@@ -109,9 +118,15 @@ TOOLS: List[Dict[str, Any]] = [
     },
 ]
 
-SYSTEM_PROMPT = """Du bist KIRA. Nutze Tools wenn der User nach Routen/Trips/Aktivitäten fragt.
-WICHTIG: Antworte bei Tools NUR mit dem JSON.
-"""
+SYSTEM_PROMPT = (
+    "Du bist KIRA. Deine Aufgabe ist es, JSON-Daten für das Frontend zu generieren.\n"
+    "REGELN:\n"
+    "1. Wenn das Ziel unbekannt ist -> Nutze 'find_best_city'.\n"
+    "2. Für Tagesausflüge/Routen mit Stopps -> Nutze 'plan_single_day_trip'.\n"
+    "3. Für Mehrtagesreisen/Wochenenden -> Nutze 'plan_multiday_trip'.\n"
+    "4. WICHTIG: Sobald du ein Planungs-Tool (Punkt 2 oder 3) aufgerufen hast, ist deine Arbeit erledigt. "
+    "Generiere danach KEINEN Text mehr."
+)
 
 
 async def handle_chat_websocket(websocket: WebSocket) -> None:
@@ -158,7 +173,7 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
 
                         result_str = ""
 
-                        if func_name == "plan_journey":
+                        if func_name == "get_simple_route":
                             result_str = plan_journey_logic(
                                 start=args.get("start", ""),
                                 end=args.get("end", ""),
@@ -169,7 +184,7 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                             # Tool payload sent -> stop the assistant loop (frontend renders JSON)
                             should_break_loop = True
 
-                        elif func_name == "plan_activities":
+                        elif func_name == "search_local_places":
                             result_str = plan_activities_logic(
                                 location=args.get("location", ""),
                                 interest=args.get("interest", ""),
@@ -190,7 +205,7 @@ async def handle_chat_websocket(websocket: WebSocket) -> None:
                             # Tool payload sent -> stop the assistant loop (frontend renders JSON)
                             should_break_loop = True
 
-                        elif func_name == "plan_complete_trip":
+                        elif func_name == "plan_single_day_trip":
                             result_str = plan_complete_trip_logic(
                                 start=args.get("start", ""),
                                 end=args.get("end", ""),

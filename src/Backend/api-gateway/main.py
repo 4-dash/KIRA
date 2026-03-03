@@ -1,4 +1,5 @@
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Any, Dict
 import httpx
@@ -7,10 +8,25 @@ import json
 import asyncio
 import math
 from anyio import to_thread
+from dotenv import load_dotenv
+
+import uuid
+from opensearchpy import OpenSearch, RequestsHttpConnection
 
 from chat_ws import handle_chat_websocket
 
 app = FastAPI()
+
+load_dotenv()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ============================================================
 # WebSocket Chat (old frontend compatibility)
@@ -19,6 +35,37 @@ app = FastAPI()
 @app.websocket("/chat")
 async def chat_endpoint(websocket: WebSocket):
     await handle_chat_websocket(websocket)
+
+
+# ============================================================
+# Saved Trips (ported from source repo Backend/api.py)
+# ============================================================
+
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "opensearch")
+OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
+SAVED_TRIPS_INDEX = os.getenv("SAVED_TRIPS_INDEX", "saved-trips")
+
+os_client = OpenSearch(
+    hosts=[{"host": OPENSEARCH_HOST, "port": OPENSEARCH_PORT}],
+    use_ssl=False,
+    verify_certs=False,
+    connection_class=RequestsHttpConnection,
+)
+
+
+@app.post("/api/save_trip")
+async def save_trip(request: Request):
+    """Stores a trip payload into OpenSearch (index: saved-trips)."""
+    try:
+        trip_data = await request.json()
+        trip_id = str(uuid.uuid4())
+
+        os_client.index(index=SAVED_TRIPS_INDEX, id=trip_id, body=trip_data)
+        print(f"💾 Trip {trip_id} erfolgreich in DB gespeichert!")
+        return {"status": "success", "id": trip_id}
+    except Exception as e:
+        print(f"❌ Fehler beim Speichern: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 # ============================================================

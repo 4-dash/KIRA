@@ -39,6 +39,7 @@ services:
       - OPENSEARCH_HOST=opensearch
       - OPENSEARCH_PORT=9200
       - OPENSEARCH_INDEX=travel-plans
+      - OPENSEARCH_POI_INDEX=tourism-data-v-working
       
     ports:
       - "8001:8001"
@@ -54,6 +55,9 @@ services:
     environment:
       - TRIP_PLANNER_URL=http://trip-planner:8001
       - GATEWAY_TIMEOUT_SEC=30
+      - OPENSEARCH_HOST=opensearch
+      - OPENSEARCH_PORT=9200
+      - SAVED_TRIPS_INDEX=saved-trips
       - BAYERNCLOUD_API_KEY=${BAYERNCLOUD_API_KEY}
       - BAYERNCLOUD_API_BASE_URL=${BAYERNCLOUD_API_BASE_URL}
       - BAYERNCLOUD_DATA_DIR=/data/bayerncloud
@@ -67,6 +71,7 @@ services:
       - "8000:8000"
     depends_on:
       - trip-planner
+      - opensearch
     restart: unless-stopped
 
   opensearch-dashboards:

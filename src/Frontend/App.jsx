@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders, Train, Bus, Footprints, Clock, ArrowRight, Flag } from 'lucide-react';
+import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders, Train, Bus, Footprints, Clock, ArrowRight, Flag, Save, Check, Download, Upload } from 'lucide-react';
 
 // --- Konfiguration & Mock-Daten ---
 
@@ -13,6 +13,7 @@ const INITIAL_MESSAGE = {
 
 const ChatMessage = ({ msg }) => {
   const isAi = msg.sender === 'ai';
+  const [isSaved, setIsSaved] = useState(false);
   
   let tripData = null;
   let activityData = null; 
@@ -49,6 +50,42 @@ const ChatMessage = ({ msg }) => {
         }
     }
   }
+
+  const handleSaveTrip = async () => {
+    const dataToSave = multiStepData || tripData;
+    if (!dataToSave) return;
+
+    try {
+      const response = await fetch('http://localhost:8000/api/save_trip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          saved_at: new Date().toISOString(),
+          plan: dataToSave,
+        }),
+      });
+      if (response.ok) setIsSaved(true);
+    } catch (e) {
+      console.error('Fehler beim Speichern der Reise:', e);
+    }
+  };
+
+  const handleExportTrip = () => {
+    const dataToExport = multiStepData || tripData;
+    if (!dataToExport) return;
+
+    const dataStr = JSON.stringify(dataToExport, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `KIRA_Reiseplan_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
   return (
     <div className={`flex w-full mb-4 ${isAi ? 'justify-start' : 'justify-end'}`}>
       <div className={`flex max-w-[95%] md:max-w-[85%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
@@ -104,6 +141,31 @@ const ChatMessage = ({ msg }) => {
                         )}
                     </div>
                 ))}
+            </div>
+          )}
+
+          {(tripData || multiStepData) && (
+            <div className="flex flex-wrap gap-2 mt-4 ml-1">
+              <button
+                onClick={handleSaveTrip}
+                disabled={isSaved}
+                className={`px-4 py-2 w-fit rounded-xl text-sm font-bold flex items-center gap-2 transition-all ${
+                  isSaved
+                    ? 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                    : 'bg-slate-800 text-white hover:bg-slate-700 shadow-md hover:shadow-lg'
+                }`}
+              >
+                {isSaved ? <Check size={16} /> : <Save size={16} />}
+                {isSaved ? 'In Datenbank gespeichert' : 'In DB speichern'}
+              </button>
+
+              <button
+                onClick={handleExportTrip}
+                className="px-4 py-2 w-fit rounded-xl text-sm font-bold flex items-center gap-2 transition-all bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 shadow-sm hover:shadow-md"
+              >
+                <Download size={16} />
+                Als JSON exportieren
+              </button>
             </div>
           )}
         </div>
@@ -254,6 +316,41 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const routeLayerRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // 🔥 Import-Logik (ported from source repo)
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+  const handleFileChange = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const content = e.target.result;
+        // Kurzer Test, ob es wirklich JSON ist
+        JSON.parse(content);
+
+        // Wir tun so, als hätte die KI diese Nachricht gerade geschrieben.
+        // Dadurch greifen alle bestehenden Karten- und Render-Funktionen!
+        setMessages((prev) => [
+          ...prev,
+          { id: Date.now(), sender: 'ai', text: content },
+        ]);
+
+        // Setzt den ActiveDay wieder auf 1, falls es ein Mehrtagestrip ist
+        setActiveDay(1);
+      } catch (err) {
+        console.error('Invalid JSON file', err);
+        alert('Die hochgeladene Datei ist kein gültiger KIRA-Reiseplan.');
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = ''; // Feld zurücksetzen, damit man die gleiche Datei nochmal laden kann
+  };
+
 
   // 1. WebSocket Verbindung herstellen
   useEffect(() => {
@@ -497,24 +594,6 @@ export default function App() {
     }
   };
 
-  const testTripCard = () => {
-    // Einfache Testfunktion
-  };
-
-  const handleDemoClick = () => {
-    const demoJson = JSON.stringify({
-      date: "2026-01-30",
-      start: "Fischen",
-      end: "Sonthofen",
-      total_duration: "23",
-      legs: [
-        { mode: "WALK", from: "Dein Standort", to: "Fischen Bhf", start_time: "08:00", end_time: "08:10", duration: 10, geometry: "_p~iF~ps|U_ulLnnqC" },
-        { mode: "RAIL", line: "RE 17", from: "Fischen Bhf", to: "Sonthofen Bf", start_time: "08:12", end_time: "08:20", duration: 8, geometry: "_p~iF~ps|U_ulLnnqC" }
-      ]
-    });
-    setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: demoJson }]);
-  };
-
   return (
     <div className="h-screen w-full bg-slate-50 flex flex-col md:flex-row overflow-hidden font-sans rounded-3xl">
       
@@ -548,8 +627,19 @@ export default function App() {
             </button>
           </form>
           <div className="flex gap-2">
-            <button onClick={handleDemoClick} className="text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded font-bold">
-              🎫 Demo: Fischen-Sonthofen
+            {/* Import Button & Verstecktes Input-Feld */}
+            <input
+              type="file"
+              accept=".json"
+              ref={fileInputRef}
+              onChange={handleFileChange}
+              style={{ display: 'none' }}
+            />
+            <button
+              onClick={handleImportClick}
+              className="text-xs bg-slate-200 text-slate-700 px-3 py-1 rounded font-bold flex items-center gap-1 hover:bg-slate-300"
+            >
+              <Upload size={14} /> Trip importieren
             </button>
           </div>
         </div>
