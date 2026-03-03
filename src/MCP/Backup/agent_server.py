@@ -1,4 +1,5 @@
 import os
+import ast
 import requests
 import sys
 from datetime import datetime, timedelta
@@ -18,6 +19,7 @@ import random
 from collections import Counter
 from math import radians, cos, sin, asin, sqrt
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
+sys.stderr.write("🚨🚨🚨 HALLO VON DER RICHTIGEN DATEI! 🚨🚨🚨\n")
 # 1. KONFIGURATION LADEN
 load_dotenv()
 
@@ -120,6 +122,54 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     a = sin(dLat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dLon/2)**2
     c = 2 * asin(sqrt(a))
     return R * c
+
+def check_is_open(opening_data, query_dt):
+    """
+    Prüft, ob eine Location zum gegebenen Zeitpunkt (datetime) geöffnet ist.
+    Gibt True zurück, wenn offen (oder keine Daten vorhanden), sonst False.
+    """
+    if not opening_data: 
+        return True # Im Zweifel für den Angeklagten (wir nehmen an, es ist offen)
+
+    try:
+        if isinstance(opening_data, str):
+            rules = ast.literal_eval(opening_data)
+        else:
+            rules = opening_data
+    except:
+        return True # Parsing-Fehler -> Ignorieren und als offen betrachten
+
+    current_date_str = query_dt.strftime("%Y-%m-%d")
+    current_time_str = query_dt.strftime("%H:%M")
+    
+    days_map = {
+        0: "https://schema.org/Monday",
+        1: "https://schema.org/Tuesday",
+        2: "https://schema.org/Wednesday",
+        3: "https://schema.org/Thursday",
+        4: "https://schema.org/Friday",
+        5: "https://schema.org/Saturday",
+        6: "https://schema.org/Sunday"
+    }
+    today_url = days_map[query_dt.weekday()]
+    
+    for rule in rules:
+        valid_from = rule.get('validFrom', '1900-01-01')
+        valid_through = rule.get('validThrough', '2099-12-31')
+        
+        if not (valid_from <= current_date_str <= valid_through):
+            continue
+            
+        days = rule.get('dayOfWeek', [])
+        if today_url in days:
+            opens = rule.get('opens', '00:00')
+            closes = rule.get('closes', '23:59')
+            if not closes: closes = "23:59"
+            
+            if opens <= current_time_str <= closes:
+                return True
+                
+    return False
 
 def encode_polyline(points):
     """
@@ -410,6 +460,8 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
             if "museum" in name.lower() or "heimathaus" in name.lower(): cat_display = "Museum"
             elif "gasthof" in name.lower() or "restaurant" in name.lower(): cat_display = "Restaurant"
 
+            opening_hours = meta.get("openingHoursSpecification", None)
+
             activity_item = {
                 "name": name,
                 "category": cat_display,
@@ -418,12 +470,13 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
                 "lat": lat,
                 "lon": lon,
                 "source": meta.get("source", "unknown"),
-                "geometry": encoded_geometry # <--- Jetzt als String!
+                "geometry": encoded_geometry,
+                "opening_hours": opening_hours
             }
             
             if any(a['name'] == activity_item['name'] for a in activities_list): continue
             activities_list.append(activity_item)
-            if len(activities_list) >= 5: break
+            if len(activities_list) >= 15: break
         
         result = {
             "type": "activity_list",
@@ -440,7 +493,8 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
         sys.stderr.write(f"[ERROR] DB-Fehler in plan_activities: {e}\n")
         return json.dumps({"error": str(e)})
     
-def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int = 2) -> str:
+def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int = 2, avoid_places: list = None) -> str:
+    if avoid_places is None: avoid_places = []
     sys.stderr.write(f"[LOGIC] Plane Rundreise: {start} -> {end} ({interest}) -> {start}\n")
     
     start_lat, start_lon = get_coords(start)
@@ -462,36 +516,50 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
         interests_to_search = [interest, interest]
 
     # --- SCHRITT 2: AKTIVITÄTEN SAMMELN ---
-    stops = []
-    seen_names = set()
-    
+   # --- SCHRITT 2: POOLS LADEN ---
+    pools = []
     for sub_interest in interests_to_search:
         act_json = plan_activities_logic(location=end, interest=sub_interest)
         act_data = json.loads(act_json)
-        
-        if "items" in act_data:
-            for item in act_data["items"]:
-                if item["name"] not in seen_names:
-                    stops.append(item)
-                    seen_names.add(item["name"])
-                    break 
-        
-        if len(stops) >= num_stops: break
+        pools.append(act_data.get("items", []))
 
-    intro_msg = f"Ich habe einen Ausflug von {start} nach {end} mit {len(stops)} Stopps geplant:"
-    if not stops:
-        intro_msg = f"Keine passenden Aktivitäten in {end} gefunden. Hier ist die reine Fahrt:"
-
-    # --- SCHRITT 3: ROUTING MIT ZEIT-MANAGEMENT 🕒 ---
+    # --- SCHRITT 3: ROUTING MIT ZEIT-MANAGEMENT & ÖFFNUNGSZEITEN 🕒 ---
     steps = []
     current_coords = start_coords
     current_name = start
+    seen_names = set()
+    stops_found = 0
     
     # Wir starten morgen um 09:00 Uhr
     current_time_obj = datetime.now() + timedelta(days=1)
     current_time_obj = current_time_obj.replace(hour=9, minute=0, second=0)
     
-    for i, stop in enumerate(stops):
+    for pool in pools:
+        if stops_found >= num_stops: break
+        
+        # Geschätzte Ankunft für die Öffnungszeiten-Prüfung (ca. 45 Min Fahrt)
+        check_time = current_time_obj + timedelta(minutes=45)
+        
+        stop = None
+        # 1. 🔥 Suche ein ITEM das OFFEN ist
+        for item in pool:
+            if item["name"] not in seen_names and item["name"] not in avoid_places and check_is_open(item.get("opening_hours"), check_time):
+                stop = item
+                break
+        
+        # 2. Fallback
+        if not stop:
+            for item in pool:
+                if item["name"] not in seen_names and item["name"] not in avoid_places:
+                    stop = item
+                    sys.stderr.write(f"[WARN] Fallback: {stop['name']} (Öffnungszeiten unklar/geschlossen)\n")
+                    break
+        
+        if not stop: continue
+        
+        seen_names.add(stop["name"])
+        stops_found += 1
+        
         stop_name = stop["name"]
         stop_coords = (stop["lat"], stop["lon"])
         label = f"Anreise zu: {stop['category']} ({stop_name})"
@@ -574,6 +642,10 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
     else:
          steps.append({ "type": "error", "message": "Keine Rückverbindung gefunden." })
 
+    intro_msg = f"Ich habe einen Ausflug von {start} nach {end} mit {stops_found} Stopps geplant:"
+    if stops_found == 0:
+        intro_msg = f"Keine passenden Aktivitäten in {end} gefunden."
+
     result = {
         "type": "multi_step_plan",
         "intro": intro_msg,
@@ -582,7 +654,8 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
     
     return json.dumps(result)
 
-def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
+def plan_multiday_trip_logic(start: str, end: str, days: int = 4, hotel_pref: str = "Hotel Unterkunft Central", activity_pref: str = "Wandern Natur Freizeit", food_pref: str = "Restaurant Gaststätte", culture_pref: str = "Museum", avoid_places: list = None) -> str:
+    if avoid_places is None: avoid_places = []
     if days < 1: days = 1
     
     sys.stderr.write(f"[LOGIC] Plane Trip für {days} Tage nach {end} (Basis-Strategie: Zentral)\n")
@@ -606,6 +679,7 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
     hotel = None
     if "items" in hotels_data:
         for h in hotels_data["items"]:
+            if h["name"] in avoid_places: continue
             dist = calculate_distance(end_lat, end_lon, h["lat"], h["lon"])
             if dist <= 2.5: 
                 hotel = h
@@ -623,9 +697,9 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
         sys.stderr.write(f"[WARN] Kein Hotel gefunden. Nutze Koordinaten von {end} als Basis.\n")
 
     # 3. POOLS FÜLLEN
-    museums = json.loads(plan_activities_logic(end, "Museum"))
-    food = json.loads(plan_activities_logic(end, "Restaurant Gaststätte"))
-    leisure = json.loads(plan_activities_logic(end, "Wandern Natur Freizeit"))
+    museums = json.loads(plan_activities_logic(end, culture_pref))
+    food = json.loads(plan_activities_logic(end, food_pref))
+    leisure = json.loads(plan_activities_logic(end, activity_pref))
     
     pool_museums = museums.get("items", [])
     pool_food = food.get("items", [])
@@ -633,9 +707,31 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4) -> str:
     
     steps = []
     
-    def get_item(pool):
-        return pool.pop(0) if pool else None
+    # --- HELPER: ITEM MIT ÖFFNUNGSZEITEN-CHECK HOLEN ---
+    def get_item(pool, time_str="tomorrow 12:00"):
+        # 1. Zeit-String (z.B. "tomorrow 14:30") in ein datetime-Objekt verwandeln
+        try:
+            check_time = datetime.now() + timedelta(days=1)
+            parts = time_str.split()
+            if len(parts) > 1 and ":" in parts[-1]:
+                h, m = map(int, parts[-1].split(':'))
+                check_time = check_time.replace(hour=h, minute=m, second=0)
+        except:
+            check_time = datetime.now()
 
+        # 2. 🔥 Suche ein Item, das OFFEN ist
+        for i, item in enumerate(pool):
+            if item["name"] not in avoid_places and check_is_open(item.get("opening_hours"), check_time):
+                return pool.pop(i) # Gefunden und aus Pool entfernen
+                
+        # 3. Fallback: Falls alles zu ist, nimm einfach das erste, das nicht auf der Blacklist steht
+        while pool:
+            item = pool.pop(0)
+            if item["name"] not in avoid_places:
+                sys.stderr.write(f"[WARN] Fallback in Mehrtagesreise: {item['name']} (Öffnungszeiten unklar/geschlossen)\n")
+                return item
+                
+        return None
     # --- HELPER: ROUTE ---
     def add_route(origin_name, origin_coords, dest_name, dest_coords, time_str, label="Fahrt"):
         if not origin_name or not dest_name: return
@@ -805,31 +901,41 @@ def find_best_city_logic(query: str) -> str:
 # ==========================================
 
 @mcp.tool()
-def plan_journey(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
-    """Plant eine Reise (Wrapper für MCP)."""
+def get_simple_route(start: str, end: str, time_str: str = "tomorrow 07:30") -> str:
+    """Berechnet nur eine reine Fahrt von A nach B, ohne Aktivitäten."""
     return plan_journey_logic(start, end, time_str)
 
 @mcp.tool()
-def plan_activities(location: str, interest: str = "") -> str:
-    """Sucht Aktivitäten (Wrapper für MCP)."""
+def search_local_places(location: str, interest: str = "") -> str:
+    """
+    Sucht NUR eine lose Liste von Orten in einer Stadt. 
+    Gibt KEINEN Zeitplan und KEINE Route zurück!
+    🔴 VERBOTEN: Nutze dies NIEMALS, wenn der User eine Reise plant oder ändert (z.B. "Ich will mehr Museen an Tag 2").
+    """
     return plan_activities_logic(location, interest)
 
 @mcp.tool()
-def plan_complete_trip(start: str, end: str, interest: str) -> str:
-    """Plant eine Reise mit Zwischenstopps basierend auf Interessen (z.B. Museen)."""
-    return plan_complete_trip_logic(start, end, interest)
+def plan_single_day_trip(start: str, end: str, interest: str, num_stops: int = 2, avoid_places: list = None) -> str:
+    """
+    Plant oder ändert einen EINZELNEN Tagesausflug (ohne Übernachtung).
+    🔴 VERBOTEN: Nicht nutzen für Mehrtagesreisen oder wenn der User "Tag 2", "Tag 3" etc. erwähnt!
+    """
+    return plan_complete_trip_logic(start, end, interest, num_stops, avoid_places)
 
 @mcp.tool()
-def plan_multiday_trip(start: str, end: str, days: int = 4) -> str:
-    """Plans a multi-day trip. Days can be specified by the user."""
-    return plan_multiday_trip_logic(start, end, days)
+def plan_multiday_trip(start: str, end: str, days: int = 3, hotel_pref: str = "Hotel Unterkunft Central", activity_pref: str = "Wandern Natur Freizeit", food_pref: str = "Restaurant Gaststätte", culture_pref: str = "Museum", avoid_places: list = None) -> str:
+    """
+    Plant oder ÄNDERT eine komplette Mehrtagesreise mit Hotel und Zeitplan.
+    🟢 PFLICHT: Nutze zwingend dieses Tool, wenn der User "Tag 2", "Tag 3" etc. erwähnt oder einen bestehenden Trip ändern will!
+    WICHTIG: 
+    1. Lese 'start', 'end' und 'days' aus dem bisherigen Chatverlauf ab. Erfinde NIEMALS eigene Startorte.
+    2. Setze activity_pref="Museum" UND culture_pref="Museum" wenn der User mehr Museen will.
+    """
+    return plan_multiday_trip_logic(start, end, days, hotel_pref, activity_pref, food_pref, culture_pref, avoid_places)
 
 @mcp.tool()
 def find_best_city(query: str) -> str:
-    """
-    Analyzes the user's interests (e.g. 'Quad', 'Water') and finds the best city name in Allgäu.
-    Returns ONLY the city name (e.g. 'Oberstdorf').
-    """
+    """Findet die beste Stadt im Allgäu basierend auf Suchbegriffen."""
     return find_best_city_logic(query)
 
 if __name__ == "__main__":
