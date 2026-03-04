@@ -1,4 +1,3 @@
-version: "3.9"
 
 services:
   otp:
@@ -96,7 +95,7 @@ services:
       - neo4j_logs:/logs
 
   ingester:
-    build: ./Backend/ingester
+    build: ./Backend/Ingester
     container_name: ingester
     environment:
       - OPENSEARCH_HOST=opensearch
