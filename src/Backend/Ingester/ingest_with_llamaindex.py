@@ -22,7 +22,7 @@ OPENSEARCH_AUTH = None
 
 INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v6")
 
-DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
+DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api_gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
 EMBEDDING_MODEL_NAME = os.getenv("EMBEDDING_MODEL_NAME", "paraphrase-multilingual-MiniLM-L12-v2")

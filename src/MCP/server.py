@@ -10,7 +10,7 @@ load_dotenv(os.path.join(ROOT, ".env"))
 
 mcp = FastMCP("KIRA-Agent-Server")
 
-TRIP_PLANNER_URL = os.getenv("TRIP_PLANNER_URL", "http://trip-planner:8001").rstrip("/")
+TRIP_PLANNER_URL = os.getenv("TRIP_PLANNER_URL", "http://trip_planner:8001").rstrip("/")
 
 
 def _pretty(obj) -> str:
@@ -23,7 +23,7 @@ def _pretty(obj) -> str:
 @mcp.tool()
 def plan_journey(start: str, end: str, date: str = "", time: str = "") -> str:
     """
-    Plant eine Reise via trip-planner Service (OTP-Logik bleibt im trip-planner).
+    Plant eine Reise via trip_planner Service (OTP-Logik bleibt im trip_planner).
 
     Args:
         start: Starthaltestelle (z.B. "Fischen")
@@ -46,11 +46,11 @@ def plan_journey(start: str, end: str, date: str = "", time: str = "") -> str:
         r.raise_for_status()
         data = r.json()
     except Exception as e:
-        print(f"[MCP][plan_journey] ERROR calling trip-planner: {e}")
-        return f"Error calling trip-planner: {e}"
+        print(f"[MCP][plan_journey] ERROR calling trip_planner: {e}")
+        return f"Error calling trip_planner: {e}"
 
     # DEV DEBUG (preview response)
-    print(f"[MCP][plan_journey] trip-planner response (preview):\n{_pretty(data)}")
+    print(f"[MCP][plan_journey] trip_planner response (preview):\n{_pretty(data)}")
 
     # Try to format a readable summary; fallback to raw JSON
     try:

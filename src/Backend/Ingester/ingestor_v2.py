@@ -23,7 +23,7 @@ OPENSEARCH_AUTH = None
 
 INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v-working")
 
-DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
+DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api_gateway/bayerncloud-data")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
 # Azure OpenAI Specifics

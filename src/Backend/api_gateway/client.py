@@ -2,7 +2,7 @@ import os
 import httpx
 from pydantic import BaseModel
 
-TRIP_PLANNER_URL = os.getenv("TRIP_PLANNER_URL", "http://trip-planner:8001")
+TRIP_PLANNER_URL = os.getenv("TRIP_PLANNER_URL", "http://trip_planner:8001")
 
 class TripRequest(BaseModel):
     origin: str

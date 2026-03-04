@@ -29,9 +29,9 @@ services:
       - os-data:/usr/share/opensearch/data
     restart: unless-stopped
 
-  trip-planner:
-    build: ./Backend/trip-planner
-    container_name: trip-planner
+  trip_planner:
+    build: ./Backend/trip_planner
+    container_name: trip_planner
     environment:
       - OTP_URL=http://otp:8080/otp/routers/default/index/graphql
       - OTP_TIMEOUT_SEC=30
@@ -48,11 +48,11 @@ services:
     restart: unless-stopped
     
     
-  api-gateway:
-    build: ./Backend/api-gateway
-    container_name: api-gateway
+  api_gateway:
+    build: ./Backend/api_gateway
+    container_name: api_gateway
     environment:
-      - TRIP_PLANNER_URL=http://trip-planner:8001
+      - TRIP_PLANNER_URL=http://trip_planner:8001
       - GATEWAY_TIMEOUT_SEC=30
       - BAYERNCLOUD_API_KEY=${BAYERNCLOUD_API_KEY}
       - BAYERNCLOUD_API_BASE_URL=${BAYERNCLOUD_API_BASE_URL}
@@ -62,7 +62,7 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - trip-planner
+      - trip_planner
     restart: unless-stopped
 
   opensearch-dashboards:
