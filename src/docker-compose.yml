@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
 
   opensearch:
-    image: opensearchproject/opensearch:2.13.0
+    image: opensearchproject/opensearch:latest
     environment:
       - discovery.type=single-node
       - DISABLE_SECURITY_PLUGIN=true
@@ -35,6 +35,18 @@ services:
       - "9200:9200"
       - "9600:9600"
     restart: unless-stopped
+
+    opensearch-dashboards:
+      image: opensearchproject/opensearch-dashboards:latest
+      container_name: os-dashboards
+      restart: unless-stopped
+      environment:
+        - 'OPENSEARCH_HOSTS=["http://opensearch:9200"]'
+        - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+      ports:
+        - 5601:5601
+      depends_on:
+        - opensearch
 
   backend:
     build:
