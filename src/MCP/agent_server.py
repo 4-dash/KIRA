@@ -239,10 +239,19 @@ def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
         date: $date
         time: $time
         numItineraries: 3
-        transportModes: [{mode: TRANSIT}, {mode: WALK}]
+        transportModes: [
+        {mode: WALK},
+        {mode: TRANSIT},
+        {mode: CAR},
+        {mode: CAR, qualifier: PARK},
+        {mode: CAR, qualifier: RENT},
+        {mode: BICYCLE},
+        {mode: BICYCLE, qualifier: RENT}
+        ]
         walkReluctance: 500.0    # <--- EXTREM! Laufen ist der absolute Feind.
         waitReluctance: 0.1      # <--- Warten ist okay.
         maxWalkDistance: 5000.0  # <--- Radius groß genug für abgelegene Ziele.
+        maxBikeDistance: 20000
       ) {
         itineraries {
           duration

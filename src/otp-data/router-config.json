@@ -1,0 +1,49 @@
+{
+  "updaters": [
+    {
+      "type": "stop-time-updater",
+      "frequency": "30s",
+      "url": "https://realtime.gtfs.de/realtime-free.pb",
+      "feedId": "1"
+    },
+    {
+      "type": "real-time-alerts",
+      "frequency": "30s",
+      "url": "https://realtime.gtfs.de/realtime-free.pb",
+      "feedId": "1"
+    },
+
+     {
+      "type": "vehicle-rental",
+      "sourceType": "gbfs",
+      "network": "oberschwabenmobil",
+      "frequency": "2m",
+      "url": "https://api.mobidata-bw.de/sharing/gbfs/v2/oberschwabenmobil/gbfs",
+      "language": "de"
+    },
+    {
+      "type": "vehicle-rental",
+      "sourceType": "gbfs",
+      "network": "dott_lindau",
+      "frequency": "1m",
+      "url": "https://api.mobidata-bw.de/sharing/gbfs/v2/dott_lindau/gbfs",
+      "language": "de"
+    },
+    {
+      "type": "vehicle-rental",
+      "sourceType": "gbfs",
+      "network": "nextbike_vn",
+      "frequency": "2m",
+      "url": "https://api.mobidata-bw.de/sharing/gbfs/v2/nextbike_vn/gbfs",
+      "language": "de"
+    },
+    {
+      "type": "vehicle-rental",
+      "sourceType": "gbfs",
+      "network": "callabike",
+      "frequency": "2m",
+      "url": "https://api.mobidata-bw.de/sharing/gbfs/v2/callabike/gbfs",
+      "language": "de"
+    }
+  ]
+}
