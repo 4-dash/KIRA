@@ -360,19 +360,28 @@ export default function App() {
 
   // 1. WebSocket Verbindung herstellen
   useEffect(() => {
-    const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8000/chat";
+    const host = window.location.hostname;
+    
+    const wsUrl = `ws://${host}:8000/chat`;
+
     const ws = new WebSocket(wsUrl); 
-    ws.onopen = () => console.log('✅ Connected to KIRA Backend');
+    
+    ws.onopen = () => console.log('✅ Connected to KIRA Backend at ' + wsUrl);
+    
     ws.onmessage = (event) => {
       const aiText = event.data;
       setIsLoading(false);
       setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: aiText }]);
     };
+    
     ws.onerror = (e) => {
         console.error('❌ WebSocket Error:', e);
         setIsLoading(false);
-    }
+    };
+
     setSocket(ws);
+    
+    // Clean up connection when component unmounts
     return () => ws.close();
   }, []);
 

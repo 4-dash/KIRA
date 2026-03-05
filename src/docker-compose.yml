@@ -30,7 +30,7 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - opensearch-data:/usr/share/opensearch/data
+      - os_data:/usr/share/opensearch/data
     ports:
       - "9200:9200"
       - "9600:9600"
@@ -57,8 +57,6 @@ services:
     build:
         context: ./Frontend
         dockerfile: Dockerfile
-    environment:
-        - VITE_WS_URL=ws://localhost:8000/chat
     depends_on:
         - backend
     ports:
@@ -104,5 +102,5 @@ services:
     restart: "no"
 
 volumes:
-  opensearch-data:
+  os_data:
   bc-data:
