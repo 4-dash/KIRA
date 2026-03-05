@@ -14,7 +14,7 @@ services:
     restart: unless-stopped
 
   opensearch:
-    image: opensearchproject/opensearch:2.11.1
+    image: opensearchproject/opensearch:latest
     environment:
       - discovery.type=single-node
       - DISABLE_SECURITY_PLUGIN=true
@@ -35,9 +35,15 @@ services:
       - "9200:9200"
       - "9600:9600"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
   opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:2.11.1
+    image: opensearchproject/opensearch-dashboards:latest
     container_name: opensearch-dashboard
     restart: unless-stopped
     environment:
@@ -59,8 +65,10 @@ services:
       - OPENSEARCH_PORT=9200
       - OTP_URL=http://otp:8080/otp/routers/default/index/graphql
     depends_on:
-      - opensearch
-      - otp
+      otp:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -116,4 +124,6 @@ services:
 
 volumes:
   opensearch-data:
+    external: true
+    name: kira-project_os_data
   bc-data:
