@@ -1,569 +1,794 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders } from 'lucide-react';
+import { Send, Map as MapIcon, Navigation, Star, MapPin, Menu, X, Globe, User, Bot, Loader2, AlertCircle, Filter, Sliders, Train, Bus, Footprints, Clock, ArrowRight, Flag, Save, Check, Download, Upload} from 'lucide-react';
 
 // --- Konfiguration & Mock-Daten ---
 
 const INITIAL_MESSAGE = {
   id: 1,
   sender: 'ai',
-  text: "Guten Tag! Ich bin dein KI-Reiseberater. Ich bin mit der Weltkarte verbunden. Welche Stadt möchtest du erkunden?",
-};
-
-const FILTER_OPTIONS = {
-  types: [
-    { id: 'stay', label: 'Unterkunft', icon: MapPin },
-    { id: 'dining', label: 'Gastronomie', icon: MapPin },
-    { id: 'culture', label: 'Kultur', icon: MapPin },
-    { id: 'nature', label: 'Natur', icon: MapPin },
-    { id: 'adventure', label: 'Abenteuer', icon: MapPin },
-    { id: 'shopping', label: 'Einkaufen', icon: MapPin },
-  ],
-  priceRanges: [
-    { id: '$', label: 'Budget', icon: '$' },
-    { id: '$$', label: 'Mittel', icon: '$$' },
-    { id: '$$$', label: 'Premium', icon: '$$$' },
-  ],
-  ratings: [
-    { id: 4.5, label: '4,5+ Sterne', value: 4.5 },
-    { id: 4.0, label: '4,0+ Sterne', value: 4.0 },
-    { id: 3.5, label: '3,5+ Sterne', value: 3.5 },
-  ],
+  text: "Guten Tag! Ich bin KIRA. Wohin möchtest du reisen?",
 };
 
 // --- Komponenten ---
 
 const ChatMessage = ({ msg }) => {
   const isAi = msg.sender === 'ai';
+  const [isSaved, setIsSaved] = useState(false);
+  
+  let tripData = null;
+  let activityData = null; 
+  let multiStepData = null;
+  let displayText = msg.text;
+
+  if (isAi && typeof msg.text === 'string') {
+    const cleanText = msg.text.replace(/```json/g, '').replace(/```/g, '').trim();
+    
+    if (cleanText.startsWith('{') || cleanText.startsWith('[')) {
+        try {
+          const parsed = JSON.parse(cleanText);
+          
+          if (parsed.legs) { 
+            tripData = parsed;
+            displayText = "Ich habe folgende Verbindung gefunden:"; 
+          }
+          else if (parsed.type === 'activity_list') {
+            activityData = parsed;
+            displayText = "Hier sind meine Empfehlungen:";
+          }
+          else if (parsed.type === 'multi_step_plan') {
+             multiStepData = parsed;
+             displayText = parsed.intro || "Hier ist dein Reiseplan:";
+          }
+          // --- NEU: Fehler abfangen ---
+          else if (parsed.error) {
+             displayText = `⚠️ ${parsed.error}`;
+             // Optional: Style anpassen, damit es rot wirkt?
+             // Wir lassen es erstmal als Text, aber jetzt ohne Klammern und Anführungszeichen.
+          }
+        } catch (e) { 
+          console.error("JSON Parse Error", e);
+        }
+    }
+  }
+
+  const handleSaveTrip = async () => {
+    const dataToSave = multiStepData || tripData;
+    if (!dataToSave) return;
+    
+    try {
+        const response = await fetch('http://localhost:8000/api/save_trip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                saved_at: new Date().toISOString(),
+                plan: dataToSave
+            })
+        });
+        if (response.ok) setIsSaved(true);
+    } catch (e) {
+        console.error("Fehler beim Speichern der Reise:", e);
+    }
+  };
+
+  const handleExportTrip = () => {
+    const dataToExport = multiStepData || tripData;
+    if (!dataToExport) return;
+    
+    // JSON in einen Text-String umwandeln und als Blob verpacken
+    const dataStr = JSON.stringify(dataToExport, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    // Einen unsichtbaren Link erstellen, anklicken und wieder entfernen
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `KIRA_Reiseplan_${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className={`flex w-full mb-4 ${isAi ? 'justify-start' : 'justify-end'}`}>
-      <div className={`flex max-w-[85%] md:max-w-[75%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
-        <div className={`flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 ${isAi ? 'bg-slate-200 text-slate-600' : 'bg-slate-300 text-slate-700'}`}>
+      <div className={`flex max-w-[95%] md:max-w-[85%] ${isAi ? 'flex-row' : 'flex-row-reverse'}`}>
+        <div className={`shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 ${isAi ? 'bg-slate-200 text-slate-600' : 'bg-slate-300 text-slate-700'}`}>
           {isAi ? <Bot size={18} /> : <User size={18} />}
         </div>
-        <div className={`p-3 rounded-2xl text-sm shadow-sm ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-500 text-white rounded-tr-none'}`}>
-          <p>{msg.text}</p>
+        
+        <div className="flex flex-col w-full">
+          <div className={`p-3 rounded-2xl text-sm shadow-sm w-fit ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none'}`}>
+            <p className="whitespace-pre-line">{displayText}</p>
+          </div>
+
+          {tripData && <div className="mt-2 ml-1"><TripCard data={tripData} /></div>}
+          {activityData && <div className="mt-2 ml-1"><ActivityList data={activityData} /></div>}
+
+          {multiStepData && (
+            <div className="mt-4 space-y-0 ml-1 border-l-2 border-slate-200 pl-4">
+                {multiStepData.steps.map((step, idx) => (
+                    <div key={idx} className="relative">
+                        {step.type === 'header' && (
+                           <div className="mt-8 mb-4 first:mt-0">
+                               <div className="absolute -left-[25px] mt-1.5 w-4 h-4 rounded-full bg-slate-800 border-2 border-white z-10"></div>
+                               <h3 className="font-bold text-slate-800 text-lg ml-1">{step.title}</h3>
+                           </div>
+                        )}
+                        
+                        <div className={`absolute -left-[21px] top-6 w-3 h-3 rounded-full border-2 border-white ${step.type === 'error' ? 'bg-red-300' : 'bg-slate-300'}`}></div>
+                        
+                        {step.type === 'trip' && (
+                            <div className="mb-4">
+                                <div className="text-xs font-bold text-slate-400 mb-1 uppercase tracking-wider">{step.label || 'Fahrt'}</div>
+                                <TripCard data={step.data} />
+                            </div>
+                        )}
+                        
+                        {step.type === 'activity' && (
+                            <div className="mb-6">
+                                <div className="text-xs font-bold text-indigo-400 mb-1 uppercase tracking-wider">Aktivität</div>
+                                <SinglePlaceCard place={step.data} />
+                            </div>
+                        )}
+
+                        {step.type === 'error' && (
+                            <div className="mb-6">
+                                <div className="text-xs font-bold text-red-400 mb-1 uppercase tracking-wider">Route nicht möglich</div>
+                                <div className="bg-red-50 p-3 rounded-xl border border-red-100 flex gap-3 items-center text-red-600 mt-1">
+                                    <AlertCircle size={18} className="shrink-0" />
+                                    <div className="flex flex-col">
+                                      <span className="text-xs font-medium">{step.message}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                ))}
+            </div>
+          )}
+            {/* 🔥 NEU: Container für BEIDE Speichern-Buttons */}
+          {(tripData || multiStepData) && (
+            <div className="flex flex-wrap gap-2 mt-4 ml-1">
+                {/* 1. Button: In Datenbank speichern */}
+                <button 
+                    onClick={handleSaveTrip}
+                    disabled={isSaved}
+                    className={`px-4 py-2 w-fit rounded-xl text-sm font-bold flex items-center gap-2 transition-all ${
+                        isSaved 
+                        ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' 
+                        : 'bg-slate-800 text-white hover:bg-slate-700 shadow-md hover:shadow-lg'
+                    }`}
+                >
+                    {isSaved ? <Check size={16} /> : <Save size={16} />}
+                    {isSaved ? 'In Datenbank gespeichert' : 'In DB speichern'}
+                </button>
+
+                {/* 2. Button: Lokal als Datei herunterladen */}
+                <button 
+                    onClick={handleExportTrip}
+                    className="px-4 py-2 w-fit rounded-xl text-sm font-bold flex items-center gap-2 transition-all bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 shadow-sm hover:shadow-md"
+                >
+                    <Download size={16} />
+                    Als JSON exportieren
+                </button>
+            </div>
+          )}
         </div>
+      </div>
+    </div>
+  );
+};
+
+const TripCard = ({ data }) => {
+  if (!data || !data.legs) return null;
+  return (
+    <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden my-3">
+      <div className="bg-slate-50 p-4 border-b border-slate-100 flex justify-between items-center">
+        <div>
+          <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
+            {data.start} <ArrowRight size={14} /> {data.end}
+          </div>
+          <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+            <Clock size={12} /> {data.date} • {data.total_duration} Min.
+          </div>
+        </div>
+        <div className="bg-slate-200 text-slate-600 px-2 py-1 rounded-lg text-xs font-bold">Trip</div>
+      </div>
+      <div className="p-4 relative">
+        {data.legs.map((leg, index) => {
+          const isLast = index === data.legs.length - 1;
+          let Icon = Footprints;
+          let colorClass = "bg-emerald-100 text-emerald-600 border-emerald-200";
+          if (leg.mode === 'RAIL') { Icon = Train; colorClass = "bg-blue-100 text-blue-600 border-blue-200"; }
+          if (leg.mode === 'BUS') { Icon = Bus; colorClass = "bg-amber-100 text-amber-600 border-amber-200"; }
+
+          return (
+            <div key={index} className="flex gap-3 relative pb-6 last:pb-0">
+              {!isLast && <div className="absolute left-3.75 top-8 bottom-0 w-0.5 bg-slate-200" />}
+              <div className="w-12 text-xs font-bold text-slate-500 pt-2 text-right">{leg.start_time}</div>
+              <div className="relative z-10">
+                <div className={`h-8 w-8 rounded-full border-2 flex items-center justify-center ${colorClass}`}>
+                  <Icon size={14} />
+                </div>
+              </div>
+              <div className="flex-1 pt-1">
+                <div className="font-bold text-sm text-slate-700">
+                  {leg.mode === 'WALK' ? 'Fußweg' : `${leg.mode} ${leg.line || ''}`}
+                </div>
+                <div className="text-xs text-slate-500">{leg.from} <span className="text-slate-300">→</span> {leg.to}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+};
+
+const SinglePlaceCard = ({ place }) => (
+    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex gap-4 my-2">
+        <div className="h-10 w-10 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center shrink-0">
+            <Star size={18} />
+        </div>
+        <div>
+            <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+            <p className="text-xs text-slate-600 line-clamp-2">{place.description}</p>
+        </div>
+    </div>
+);
+
+const FilterPanel = ({ isOpen, onClose }) => {
+    if(!isOpen) return null;
+    return (
+        <div className="absolute top-0 left-0 w-full h-full bg-white z-50 p-4">
+            <h2 className="font-bold mb-4">Filter</h2>
+            <button onClick={onClose} className="bg-slate-200 px-4 py-2 rounded">Schließen</button>
+        </div>
+    )
+}
+
+const ActivityList = ({ data }) => {
+  return (
+    <div className="w-full mt-3 space-y-3">
+      <p className="text-sm text-slate-500 font-medium">Ich habe {data.items.length} Vorschläge für {data.location} gefunden:</p>
+      <div className="grid grid-cols-1 gap-3">
+        {data.items.map((item, idx) => (
+          <PlaceCard key={idx} place={item} />
+        ))}
       </div>
     </div>
   );
 };
 
 const PlaceCard = ({ place }) => (
-  <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow flex items-center justify-between group cursor-pointer">
-    <div className="flex items-center gap-3">
-      <div className="h-10 w-10 rounded-xl bg-slate-100 flex items-center justify-center text-slate-600 group-hover:bg-slate-600 group-hover:text-white transition-colors">
-        <MapPin size={20} />
-      </div>
-      <div>
-        <h4 className="font-semibold text-slate-800 text-sm">{place.name}</h4>
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="flex items-center gap-1 text-slate-600"><Star size={12} fill="currentColor" /> {place.rating}</span>
-          <span>•</span>
-          <span>{place.type}</span>
-          <span>•</span>
-          <span>{place.price}</span>
+    <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow flex gap-4">
+        <div className="h-12 w-12 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center shrink-0">
+            <MapPin size={20} />
         </div>
-      </div>
+        <div>
+            <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+            <div className="text-xs text-slate-500 font-bold mb-1 uppercase tracking-wider">{place.category}</div>
+            <p className="text-xs text-slate-600 leading-relaxed line-clamp-2">{place.description}</p>
+        </div>
     </div>
-    <button className="text-slate-300 hover:text-slate-600 transition-colors">
-      <Navigation size={18} />
-    </button>
-  </div>
 );
 
-const FilterPanel = ({ isOpen, onClose, filters, setFilters }) => {
-  const toggleFilter = (category, id) => {
-    setFilters(prev => ({
-      ...prev,
-      [category]: prev[category].includes(id)
-        ? prev[category].filter(item => item !== id)
-        : [...prev[category], id]
-    }));
-  };
+// Hilfsfunktion: Decodiert Google Polyline Format
+function decodePolyline(encoded) {
+  if (!encoded) return [];
+  var poly = [];
+  var index = 0, len = encoded.length;
+  var lat = 0, lng = 0;
 
-  const clearFilters = () => {
-    setFilters({ types: [], priceRanges: [], ratings: [] });
-  };
+  while (index < len) {
+    var b, shift = 0, result = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    var dlat = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+    lat += dlat;
 
-  const activeFilterCount = Object.values(filters).flat().length;
+    shift = 0;
+    result = 0;
+    do {
+      b = encoded.charCodeAt(index++) - 63;
+      result |= (b & 0x1f) << shift;
+      shift += 5;
+    } while (b >= 0x20);
+    var dlng = ((result & 1) != 0 ? ~(result >> 1) : (result >> 1));
+    lng += dlng;
 
-  return (
-    <>
-      {isOpen && (
-        <div 
-          className="fixed inset-0 bg-black/40 z-30 backdrop-blur-sm transition-opacity rounded-3xl"
-          onClick={onClose}
-        />
-      )}
+    poly.push([lat / 1e5, lng / 1e5]);
+  }
+  return poly;
+}
 
-      <div className={`
-        fixed md:absolute top-0 left-0 w-full md:w-80 h-full bg-white shadow-2xl z-40
-        transition-transform duration-300 ease-out overflow-y-auto rounded-r-3xl md:rounded-3xl
-        ${isOpen ? 'translate-x-0' : '-translate-x-full'}
-      `}>
-        
-        <div className="sticky top-0 bg-gradient-to-r from-slate-700 to-slate-800 text-white p-4 flex items-center justify-between shadow-lg rounded-tr-3xl md:rounded-t-3xl">
-          <div className="flex items-center gap-3">
-            <Sliders size={24} />
-            <h2 className="font-bold text-lg">Filter</h2>
-            {activeFilterCount > 0 && (
-              <span className="ml-2 px-2.5 py-0.5 bg-white text-slate-700 text-xs font-bold rounded-full">
-                {activeFilterCount}
-              </span>
-            )}
-          </div>
-          <button 
-            onClick={onClose}
-            className="p-1 hover:bg-slate-600 rounded-lg transition-colors"
-          >
-            <X size={24} />
-          </button>
-        </div>
-
-        <div className="p-4 space-y-6">
-          
-          <div>
-            <h3 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
-              <MapPin size={16} />
-              Aktivitätstypen
-            </h3>
-            <div className="grid grid-cols-2 gap-2">
-              {FILTER_OPTIONS.types.map(type => (
-                <button
-                  key={type.id}
-                  onClick={() => toggleFilter('types', type.id)}
-                  className={`
-                    p-3 rounded-xl font-medium text-sm transition-all border-2
-                    ${filters.types.includes(type.id)
-                      ? 'bg-slate-700 text-white border-slate-700 shadow-lg shadow-slate-300'
-                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
-                    }
-                  `}
-                >
-                  {type.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <h3 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
-              <Filter size={16} />
-              Preisbereich
-            </h3>
-            <div className="space-y-2">
-              {FILTER_OPTIONS.priceRanges.map(price => (
-                <button
-                  key={price.id}
-                  onClick={() => toggleFilter('priceRanges', price.id)}
-                  className={`
-                    w-full p-3 rounded-xl font-medium text-sm text-left transition-all border-2
-                    ${filters.priceRanges.includes(price.id)
-                      ? 'bg-slate-700 text-white border-slate-700 shadow-lg shadow-slate-300'
-                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
-                    }
-                  `}
-                >
-                  <span className="font-bold mr-2">{price.icon}</span>
-                  {price.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <h3 className="font-semibold text-slate-800 text-sm mb-3 flex items-center gap-2">
-              <Star size={16} />
-              Mindestbewertung
-            </h3>
-            <div className="space-y-2">
-              {FILTER_OPTIONS.ratings.map(rating => (
-                <button
-                  key={rating.id}
-                  onClick={() => toggleFilter('ratings', rating.id)}
-                  className={`
-                    w-full p-3 rounded-xl font-medium text-sm text-left transition-all border-2
-                    ${filters.ratings.includes(rating.id)
-                      ? 'bg-slate-700 text-white border-slate-700 shadow-lg shadow-slate-300'
-                      : 'bg-slate-50 text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-100'
-                    }
-                  `}
-                >
-                  <Star size={16} className="inline mr-2" fill="currentColor" />
-                  {rating.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {activeFilterCount > 0 && (
-            <button
-              onClick={clearFilters}
-              className="w-full p-3 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-xl font-semibold transition-colors border border-slate-200"
-            >
-              Alle Filter löschen
-            </button>
-          )}
-        </div>
-      </div>
-    </>
-  );
-};
+// --- MAIN APP ---
 
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([INITIAL_MESSAGE]);
   const [isLoading, setIsLoading] = useState(false);
-  const [isMounted, setIsMounted] = useState(false);
+  const [socket, setSocket] = useState(null);
   const [showMobileChat, setShowMobileChat] = useState(true);
   const [showFilters, setShowFilters] = useState(false);
-  const [mapHeight, setMapHeight] = useState(50);
-  const [isResizing, setIsResizing] = useState(false);
+
+  const [activeDay, setActiveDay] = useState(1);
+  const [isMapReady, setIsMapReady] = useState(false);
   
-  const [filters, setFilters] = useState({
-    types: [],
-    priceRanges: [],
-    ratings: []
-  });
-  
-  const [mapState, setMapState] = useState({ 
-    lat: 47.5162, 
-    lon: 10.1936, 
-    name: "Allgäu, Deutschland"
-  }); 
-  
-  const [recommendations, setRecommendations] = useState([]);
   const mapContainerRef = useRef(null);
-  const containerRef = useRef(null);
-
   const messagesEndRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const routeLayerRef = useRef(null);
+  const fileInputRef = useRef(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  // 🔥 NEU: Import-Logik
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+  const handleFileChange = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        try {
+            const content = e.target.result;
+            // Kurzer Test, ob es wirklich JSON ist
+            JSON.parse(content); 
+            
+            // Wir tun so, als hätte die KI diese Nachricht gerade geschrieben.
+            // Dadurch greifen all deine bestehenden Karten- und Render-Funktionen!
+            setMessages(prev => [...prev, { 
+                id: Date.now(), 
+                sender: 'ai', 
+                text: content 
+            }]);
+            
+            // Setzt den ActiveDay wieder auf 1, falls es ein Mehrtagestrip ist
+            setActiveDay(1);
+        } catch (err) {
+            console.error("Invalid JSON file", err);
+            alert("Die hochgeladene Datei ist kein gültiger KIRA-Reiseplan.");
+        }
+    };
+    reader.readAsText(file);
+    event.target.value = ''; // Feld zurücksetzen, damit man die gleiche Datei nochmal laden kann
   };
 
+  // 1. WebSocket Verbindung herstellen
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, isLoading]);
-
-  useEffect(() => {
-    setIsMounted(true);
+    const wsUrl = import.meta.env.VITE_WS_URL || "ws://localhost:8000/chat";
+    const ws = new WebSocket(wsUrl); 
+    ws.onopen = () => console.log('✅ Connected to KIRA Backend');
+    ws.onmessage = (event) => {
+      const aiText = event.data;
+      setIsLoading(false);
+      setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: aiText }]);
+    };
+    ws.onerror = (e) => {
+        console.error('❌ WebSocket Error:', e);
+        setIsLoading(false);
+    }
+    setSocket(ws);
+    return () => ws.close();
   }, []);
 
-  // Resize Handler
+ // 2. Leaflet Karte initialisieren (ROBUST)
   useEffect(() => {
-    const handleMouseUp = () => {
-      setIsResizing(false);
-    };
+    // A) Ressourcen laden
+    if (!document.getElementById('leaflet-css')) {
+        const link = document.createElement('link');
+        link.id = 'leaflet-css';
+        link.rel = 'stylesheet';
+        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(link);
+    }
+    if (!document.getElementById('leaflet-js')) {
+        const script = document.createElement('script');
+        script.id = 'leaflet-js';
+        script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+        document.head.appendChild(script);
+    }
+    
+    // B) Karte starten
+    const checkL = setInterval(() => {
+        // Warten bis Leaflet geladen UND der Container im HTML verfügbar ist
+        if (window.L && mapContainerRef.current) {
+            clearInterval(checkL);
+            
+            // 🔥 FIX: Alte Karte sauber entfernen, bevor wir eine neue bauen!
+            // Das löst das Problem mit der weißen/leeren Karte.
+            if (mapInstanceRef.current) {
+                mapInstanceRef.current.remove();
+                mapInstanceRef.current = null;
+            }
 
-    const handleMouseMove = (e) => {
-      if (!isResizing || !containerRef.current) return;
+            routeLayerRef.current = null;
 
-      const rect = containerRef.current.getBoundingClientRect();
-      const mapDiv = mapContainerRef.current.parentElement.getBoundingClientRect();
-      const newHeight = ((e.clientY - mapDiv.top) / rect.height) * 100;
+            mapContainerRef.current.innerHTML = "";
+            if (mapContainerRef.current._leaflet_id) {
+                mapContainerRef.current._leaflet_id = null;
+            }
 
-      if (newHeight > 20 && newHeight < 80) {
-        setMapHeight(newHeight);
-      }
-    };
+            try {
+                const map = window.L.map(mapContainerRef.current).setView([47.5162, 10.1936], 11);
+                window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                mapInstanceRef.current = map;
 
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
+                setIsMapReady(true);
+                setTimeout(() => { map.invalidateSize(); }, 200);
+            } catch (e) {
+                console.error("Fehler beim Karten-Start:", e);
+            }
+        }
+    }, 100);
 
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isResizing]);
+    // Cleanup beim Verlassen
+    return () => clearInterval(checkL);
+  }, []);
 
-  // Leaflet Karte initialisieren
+  // 3. Effect: Lauscht auf Nachrichten und zeichnet Routen
+// 3. Effect: Lauscht auf Nachrichten und zeichnet Routen & Icons
   useEffect(() => {
-    if (!isMounted || !mapContainerRef.current) return;
+    const lastMsg = messages[messages.length - 1];
+    // Sicherheits-Check: Nur laufen, wenn Karte bereit ist
+    if (!lastMsg || lastMsg.sender !== 'ai' || !mapInstanceRef.current || !isMapReady) return;
 
-    // Leaflet und die CSS laden
-    const leafletLink = document.createElement('link');
-    leafletLink.rel = 'stylesheet';
-    leafletLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
-    document.head.appendChild(leafletLink);
+    try {
+        const cleanText = lastMsg.text.replace(/```json/g, '').replace(/```/g, '').trim();
+        if (cleanText.startsWith('{')) {
+            const data = JSON.parse(cleanText);
+            
+            // Layer-Management
+            if (!routeLayerRef.current) {
+                routeLayerRef.current = window.L.layerGroup().addTo(mapInstanceRef.current);
+            }
+            routeLayerRef.current.clearLayers();
 
-    const leafletScript = document.createElement('script');
-    leafletScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
-    leafletScript.onload = () => {
-      // Initialisiere die Karte
-      const map = window.L.map(mapContainerRef.current).setView([mapState.lat, mapState.lon], 12);
+            const routesToDraw = [];
+            const markersMap = new Map(); 
 
-      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
-        maxZoom: 19,
-      }).addTo(map);
+            // --- HELPER: ICONS ---
+            const getIconHtml = (category) => {
+                const cat = (category || '').toLowerCase();
+                let iconPath = '';
+                let bgColor = 'bg-slate-800'; 
 
-      // Marker
-      const marker = window.L.marker([mapState.lat, mapState.lon]).addTo(map);
+                if (cat.includes('museum') || cat.includes('kultur')) {
+                    iconPath = '<path d="M3 22v-8c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v8M3 6l9-4 9 4M12 6v7M8 6v7M16 6v7"/>';
+                    bgColor = 'bg-indigo-600';
+                } 
+                else if (cat.includes('restaurant') || cat.includes('essen') || cat.includes('gasthof')) {
+                    iconPath = '<path d="M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2M15 22v-8H7v8M19 8V2M22 8V2M19 14v8"/>';
+                    bgColor = 'bg-orange-500';
+                }
+                else if (cat.includes('wandern') || cat.includes('natur') || cat.includes('berg')) {
+                    iconPath = '<path d="m8 3 4 8 5-5 5 15H2L8 3z"/>';
+                    bgColor = 'bg-emerald-600';
+                }
+                else if (cat.includes('hotel') || cat.includes('unterkunft')) {
+                    iconPath = '<path d="M2 4v16M2 8h18a2 2 0 0 1 2 2v10M2 17h20M6 8v9"/>';
+                    bgColor = 'bg-blue-600';
+                }
+                else {
+                    iconPath = '<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>';
+                }
 
-      // Klick auf Karte
-      map.on('click', (e) => {
-        const { lat, lng } = e.latlng;
-        
-        // Marker aktualisieren
-        marker.setLatLng([lat, lng]);
-        
-        // State aktualisieren
-        setMapState({
-          lat,
-          lon: lng,
-          name: `${lat.toFixed(4)}, ${lng.toFixed(4)}`
-        });
+                return `
+                    <div class="${bgColor} w-8 h-8 rounded-full flex items-center justify-center shadow-md border-2 border-white text-white">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            ${iconPath}
+                        </svg>
+                    </div>
+                `;
+            };
 
-        
-        // Chat-Nachricht
-        setMessages(prev => [...prev, {
-          id: Date.now(),
-          sender: 'ai',
-          text: `Du hast eine neue Position ausgewählt: ${lat.toFixed(4)}, ${lng.toFixed(4)}`
-        }]);
-      });
+            const addMarker = (lat, lon, type, name, category) => { 
+                const nLat = parseFloat(lat);
+                const nLon = parseFloat(lon);
+                if (isNaN(nLat) || isNaN(nLon)) return;
 
-      // Invalidate size nach kurzer Verzögerung
-      setTimeout(() => {
-        map.invalidateSize();
-      }, 100);
+                const key = `${nLat.toFixed(5)},${nLon.toFixed(5)}`;
+                const existing = markersMap.get(key);
+                
+                if (type === 'activity') {
+                    markersMap.set(key, { pos: [nLat, nLon], type, name, category });
+                    return;
+                }
+                if (existing && existing.type === 'activity') return; 
+                markersMap.set(key, { pos: [nLat, nLon], type, name, category: null });
+            };
 
-      // Update Marker wenn sich mapState ändert
-      return () => {
-        map.remove();
-      };
-    };
+            const processLegs = (legs, stepLabel) => {
+                const label = (stepLabel || '').toLowerCase();
+                
+                legs.forEach((leg, index) => {
+                    let legColor = '#f97316'; 
+                    const isLast = index === legs.length - 1;
+                    const isFirst = index === 0;
 
-    document.body.appendChild(leafletScript);
-  }, [isMounted, mapState.lat, mapState.lon]);
+                    if (label.includes('anreise') || label.includes('hinfahrt')) {
+                        legColor = '#3b82f6'; 
+                        if (isLast && leg.mode === 'WALK') legColor = '#f97316';
+                    } 
+                    else if (label.includes('rückreise') || label.includes('rückfahrt')) {
+                        legColor = '#ef4444'; 
+                        if (isFirst && leg.mode === 'WALK') legColor = '#f97316';
+                    }
+                    if (label.includes('route') || leg.line === 'Wanderweg') {
+                        legColor = '#16a34a'; 
+                    }
 
-  const handleMouseDown = (e) => {
-    e.preventDefault();
-    setIsResizing(true);
-  };
+                    // 🔥 FIX 1: Geometrie flexibel finden (egal ob 'geometry' oder 'legGeometry.points')
+                    let rawGeo = leg.geometry || leg.legGeometry;
+                    // Falls OTP ein Objekt schickt: { points: "..." }
+                    if (rawGeo && typeof rawGeo === 'object' && rawGeo.points) {
+                        rawGeo = rawGeo.points;
+                    }
+
+                    if (rawGeo) {
+                        let points = [];
+                        if (typeof rawGeo === 'string') {
+                            points = decodePolyline(rawGeo);
+                        } else if (Array.isArray(rawGeo)) {
+                            // 🔥 FIX 2: Koordinaten-Check (Afrika-Fix) 🔥
+                            // GeoJSON ist [Lon, Lat], Leaflet will [Lat, Lon].
+                            // Wenn wir Koordinaten nahe Somalia (Lat < 40, Lon > 40) sehen, tauschen wir sie.
+                            points = rawGeo.map(pt => {
+                                if (pt[0] < 40 && pt[1] > 40) {
+                                    return [pt[1], pt[0]]; // Tauschen!
+                                }
+                                return pt;
+                            });
+                        }
+                        
+                        if (points.length > 0) {
+                            routesToDraw.push({ points: points, color: legColor });
+                        }
+                    }
+                    
+                    if (leg.from_coords) addMarker(leg.from_coords[0], leg.from_coords[1], 'transfer', leg.from);
+                    if (leg.stops) leg.stops.forEach(s => addMarker(s.lat, s.lon, 'stop', s.name));
+                    if (leg.to_coords) addMarker(leg.to_coords[0], leg.to_coords[1], 'transfer', leg.to);
+                });
+            };
+
+            // --- DATEN VERARBEITEN ---
+            if (data.legs) {
+                processLegs(data.legs, 'anreise'); 
+            } 
+            else if (data.type === 'activity_list') {
+                 data.items.forEach(item => {
+                     if (item.lat && item.lon) addMarker(item.lat, item.lon, 'activity', item.name, item.category);
+                 });
+            }
+            else if (data.type === 'multi_step_plan') {
+                // 🔥 FIX: Prüfen, ob dieser Plan überhaupt in Tage unterteilt ist
+                const hasHeaders = data.steps.some(s => s.type === 'header');
+                let currentDayCount = 0; 
+                
+                data.steps.forEach((step, idx) => {
+                    if (step.type === 'header') currentDayCount++;
+                    
+                    // 🔥 FIX: Nur filtern, wenn es wirklich Tages-Überschriften gibt!
+                    if (hasHeaders && currentDayCount !== activeDay) return; 
+
+                    if (step.type === 'trip' && step.data.legs) {
+                        let smartLabel = step.label || 'weiterfahrt';
+                        if (idx === 0) smartLabel = 'anreise';
+                        if (idx === data.steps.length - 1) smartLabel = 'rückreise';
+                        processLegs(step.data.legs, smartLabel);
+                    }
+                    if (step.type === 'activity' && step.data.lat && step.data.lon) {
+                        addMarker(step.data.lat, step.data.lon, 'activity', step.data.name, step.data.category);
+                    }
+                });
+            }
+
+            // --- ZEICHNEN ---
+            routesToDraw.forEach(route => {
+                window.L.polyline(route.points, { color: route.color, weight: 5, opacity: 0.8 }).addTo(routeLayerRef.current);
+            });
+
+            markersMap.forEach((pt) => {
+                if (pt.type === 'activity') {
+                    const icon = window.L.divIcon({
+                        className: 'custom-icon', 
+                        html: getIconHtml(pt.category),
+                        iconSize: [32, 32],
+                        iconAnchor: [16, 32], 
+                        popupAnchor: [0, -32]
+                    });
+                    window.L.marker(pt.pos, { icon: icon, zIndexOffset: 1000 }).bindPopup(pt.name).addTo(routeLayerRef.current);
+                } 
+                else {
+                    window.L.circleMarker(pt.pos, {
+                        radius: 4,
+                        fillColor: '#ffffff',
+                        color: '#3b82f6',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 1
+                    }).bindPopup(pt.name).addTo(routeLayerRef.current);
+                }
+            });
+
+            // Zoom anpassen
+            const allLatLngs = [];
+            routesToDraw.forEach(r => allLatLngs.push(...r.points));
+            markersMap.forEach(pt => allLatLngs.push(pt.pos));
+            
+            if (allLatLngs.length > 0) {
+                const bounds = window.L.latLngBounds(allLatLngs);
+                mapInstanceRef.current.fitBounds(bounds, { padding: [50, 50] });
+            }
+        }
+    } catch (e) {
+        console.error("Map Draw Error:", e);
+    }
+  },[messages, activeDay, isMapReady]);
+
+  // 4. Scroll to Bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isLoading]);
+
 
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
+
+    setActiveDay(1);
 
     const userText = input;
     setInput('');
     setMessages(prev => [...prev, { id: Date.now(), sender: 'user', text: userText }]);
     setIsLoading(true);
 
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(userText)}`
-      );
-      
-      if (!response.ok) throw new Error("Netzwerkfehler");
-      
-      const data = await response.json();
-
-      await new Promise(r => setTimeout(r, 800));
-
-      if (data && data.length > 0) {
-        const location = data[0];
-        const newLat = parseFloat(location.lat);
-        const newLon = parseFloat(location.lon);
-        const displayName = location.display_name.split(',')[0];
-
-        setMapState({ 
-          lat: newLat, 
-          lon: newLon, 
-          name: displayName
-        });
-        
-
-        setMessages(prev => [...prev, { 
-          id: Date.now() + 1, 
-          sender: 'ai', 
-          text: `Ich habe ${displayName} gefunden! Die Karte wurde aktualisiert.` 
-        }]);
-      } else {
-        setMessages(prev => [...prev, { 
-          id: Date.now() + 1, 
-          sender: 'ai', 
-          text: `Ich konnte keinen Ort namens "${userText}" finden. Bitte überprüfe die Schreibweise.` 
-        }]);
-      }
-    } catch (error) {
-      console.error("Suchfehler:", error);
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(userText);
+    } else {
       setMessages(prev => [...prev, { 
-        id: Date.now() + 1, 
+        id: Date.now(), 
         sender: 'ai', 
-        text: "Ich habe Schwierigkeiten, die Verbindung zum Kartendienst herzustellen. Bitte versuche es später erneut." 
+        text: "⚠️ Keine Verbindung zum Server. Läuft backend_api.py?" 
       }]);
-    } finally {
       setIsLoading(false);
     }
+  };
+
+  const testTripCard = () => {
+    // Einfache Testfunktion
+  };
+
+  const handleDemoClick = () => {
+    const demoJson = JSON.stringify({
+      date: "2026-01-30",
+      start: "Fischen",
+      end: "Sonthofen",
+      total_duration: "23",
+      legs: [
+        { mode: "WALK", from: "Dein Standort", to: "Fischen Bhf", start_time: "08:00", end_time: "08:10", duration: 10, geometry: "_p~iF~ps|U_ulLnnqC" },
+        { mode: "RAIL", line: "RE 17", from: "Fischen Bhf", to: "Sonthofen Bf", start_time: "08:12", end_time: "08:20", duration: 8, geometry: "_p~iF~ps|U_ulLnnqC" }
+      ]
+    });
+    setMessages(prev => [...prev, { id: Date.now(), sender: 'ai', text: demoJson }]);
   };
 
   return (
     <div className="h-screen w-full bg-slate-50 flex flex-col md:flex-row overflow-hidden font-sans rounded-3xl">
       
-      <FilterPanel 
-        isOpen={showFilters} 
-        onClose={() => setShowFilters(false)}
-        filters={filters}
-        setFilters={setFilters}
-      />
-      
-      <div className={`
-        ${showMobileChat ? 'flex' : 'hidden'} 
-        md:flex flex-col w-full md:w-[400px] lg:w-[450px] bg-white border-r border-slate-200 shadow-xl z-20 h-full absolute md:relative rounded-r-3xl md:rounded-l-3xl
-      `}>
-        <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-white rounded-tr-3xl md:rounded-tl-3xl">
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 bg-slate-700 rounded-2xl flex items-center justify-center shadow-lg">
-              <MapIcon className="text-white" size={24} />
-            </div>
-            <div>
-              <h1 className="font-bold text-slate-800 text-lg leading-tight">KIRA</h1>
-              <p className="text-xs text-slate-500 font-medium">KI-Reiseberater in Echtzeit</p>
-            </div>
-          </div>
-          <button 
-            onClick={() => setShowMobileChat(false)}
-            className="md:hidden p-2 text-slate-400 hover:text-slate-600 rounded-lg"
-          >
-            <X size={24} />
-          </button>
+      {/* Linke Seite: Chat */}
+      <div className={`${showMobileChat ? 'flex' : 'hidden'} md:flex flex-col w-full md:w-112.5 bg-white border-r border-slate-200 z-20 h-full`}>
+        <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+          <h1 className="font-bold text-slate-800 text-lg">KIRA</h1>
+          <button onClick={() => setShowMobileChat(false)} className="md:hidden"><X size={24} /></button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 bg-slate-50 scrollbar-thin scrollbar-thumb-slate-200">
-          <div className="space-y-2">
-            <div className="text-center text-xs text-slate-400 my-4 uppercase tracking-wider font-semibold">Sitzung gestartet</div>
-            
-            {messages.map((msg) => (
-              <ChatMessage key={msg.id} msg={msg} />
-            ))}
-            
-            {isLoading && (
-              <div className="flex w-full mb-4 justify-start">
-                 <div className="flex max-w-[85%] flex-row">
-                    <div className="flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center mx-2 bg-slate-200 text-slate-600">
-                      <Bot size={18} />
-                    </div>
-                    <div className="bg-white border border-slate-100 p-3 rounded-2xl rounded-tl-none shadow-sm flex items-center gap-3">
-                      <Loader2 className="animate-spin text-slate-600" size={18} />
-                      <span className="text-sm text-slate-600">Durchsuche globale Datenbank...</span>
-                    </div>
-                 </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
+        <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-4">
+          {messages.map((msg) => <ChatMessage key={msg.id} msg={msg} />)}
+          {isLoading && (
+            <div className="text-slate-500 text-sm ml-4">
+              KIRA denkt nach... <Loader2 className="inline animate-spin"/>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
         </div>
 
-        <div className="p-4 bg-white border-t border-slate-100 rounded-br-3xl md:rounded-bl-3xl">
-          <form onSubmit={handleSend} className="relative flex items-center gap-2 mb-3">
+        <div className="p-4 bg-white border-t border-slate-100">
+          <form onSubmit={handleSend} className="flex items-center gap-2 mb-2">
             <input
-              type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="Stadt eingeben..."
-              disabled={isLoading}
-              className="flex-1 bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-2xl py-3 pl-5 pr-12 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:bg-white transition-all border border-transparent focus:border-slate-200 disabled:opacity-70"
+              placeholder="Wohin möchtest du reisen?"
+              className="flex-1 bg-slate-100 rounded-2xl py-3 pl-5 pr-4 focus:outline-none"
             />
-            <button 
-              type="submit"
-              disabled={!input.trim() || isLoading}
-              className="p-2.5 bg-slate-700 text-white rounded-xl hover:bg-slate-800 disabled:opacity-50 disabled:hover:bg-slate-700 transition-colors shadow-md"
-            >
+            <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl">
               <Send size={18} />
             </button>
           </form>
-
-          <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
-            <button
-              onClick={() => setShowFilters(true)}
-              className="whitespace-nowrap px-4 py-2 bg-slate-700 hover:bg-slate-800 text-white text-sm font-semibold rounded-xl transition-colors shadow-md flex items-center gap-2"
-              title="Filter öffnen"
-            >
-              <Sliders size={16} />
-              Filter
+          
+          <div className="flex gap-2">
+            {/* Der Demo-Button wurde hier komplett entfernt */}
+            
+            {/* Import Button & Verstecktes Input-Feld */}
+            <input 
+                type="file" 
+                accept=".json" 
+                ref={fileInputRef} 
+                onChange={handleFileChange} 
+                style={{ display: 'none' }} 
+            />
+            <button onClick={handleImportClick} className="text-xs bg-slate-200 text-slate-700 px-3 py-1 rounded font-bold flex items-center gap-1 hover:bg-slate-300">
+              <Upload size={14} /> Trip importieren
             </button>
-            {['Allgäu', 'Bodensee', 'Lindau', 'Füssen'].map(city => (
-              <button 
-                key={city}
-                onClick={() => setInput(city)}
-                disabled={isLoading}
-                className="whitespace-nowrap px-3 py-1.5 bg-slate-50 hover:bg-slate-100 text-slate-600 hover:text-slate-800 text-xs font-medium rounded-lg border border-slate-200 transition-colors"
-              >
-                {city}
-              </button>
-            ))}
           </div>
         </div>
       </div>
 
-      <div 
-        ref={containerRef}
-        className="flex-1 relative bg-slate-50 h-full flex flex-col p-6 rounded-l-3xl md:rounded-r-3xl"
-      >
+      {/* Rechte Seite: Karte */}
+      <div className="flex-1 relative bg-slate-50 h-full flex flex-col p-6">
         
+        {/* 1. DIE KARTE (Liegt unten, z-0) */}
+        <div className="rounded-3xl overflow-hidden shadow-2xl border border-slate-200 bg-white h-full relative z-0">
+          <div ref={mapContainerRef} className="w-full h-full" />
+        </div>
+
+        {/* 2. MENU BUTTON (Liegt drüber) */}
         {!showMobileChat && (
           <button 
-            onClick={() => setShowMobileChat(true)}
-            className="md:hidden absolute top-4 left-4 z-30 bg-white p-3 rounded-xl shadow-lg text-slate-700"
+            onClick={() => setShowMobileChat(true)} 
+            className="absolute top-4 left-4 z-[1000] bg-white p-2 rounded-xl shadow-md border border-slate-100 hover:bg-slate-50 transition-colors"
           >
-            <Menu size={24} />
+            <Menu className="text-slate-600"/>
           </button>
         )}
-
-        <div className="absolute top-6 left-6 right-6 z-10 pointer-events-none">
-          <div className="bg-white/90 backdrop-blur-md p-3 rounded-2xl shadow-lg border border-white/50 inline-flex items-center gap-3 pointer-events-auto">
-            <div className="bg-slate-100 p-2 rounded-xl text-slate-600">
-              <MapIcon size={20} />
-            </div>
-            <div>
-              <h2 className="font-bold text-slate-800 text-sm">{mapState.name}</h2>
-              <p className="text-xs text-slate-500">Livekartenansicht</p>
-            </div>
-          </div>
-        </div>
-
-        <div 
-          className="mt-20 rounded-3xl overflow-hidden shadow-2xl border border-slate-200 bg-white"
-          style={{ height: `${mapHeight}%` }}
-        >
-          <div 
-            ref={mapContainerRef}
-            className="w-full h-full"
-            style={{ pointerEvents: isResizing ? 'none' : 'auto' }}
-          />
-        </div>
-
-        <div
-          onMouseDown={handleMouseDown}
-          className={`h-1 bg-gradient-to-r from-slate-200 via-slate-400 to-slate-200 rounded-full my-4 cursor-row-resize hover:h-1.5 transition-all select-none relative z-50 ${
-            isResizing ? 'h-1.5 bg-slate-600 shadow-lg' : ''
-          }`}
-          title="Zum Ändern der Kartengröße ziehen"
-        />
-
-        <div className="flex-1 flex flex-col">
-          {recommendations.length > 0 && (
-            <div className="bg-white rounded-3xl shadow-lg border border-slate-200 p-4 overflow-y-auto">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-slate-800 flex items-center gap-2">
-                  <Star className="text-slate-600" size={16} fill="currentColor" />
-                  Empfehlungen in {mapState.name}
-                </h3>
-                <span className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-full font-medium">Top bewertet</span>
-              </div>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                {recommendations.map(place => (
-                  <PlaceCard key={place.id} place={place} />
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
+        
+        {/* 3. TAG-AUSWAHL BUTTONS (Liegen ganz oben, z-1000) */}
+        {(() => {
+            const lastMsg = messages[messages.length - 1];
+            if (lastMsg && lastMsg.sender === 'ai') {
+                try {
+                    const cleanText = lastMsg.text.replace(/```json/g, '').replace(/```/g, '').trim();
+                    if (cleanText.startsWith('{')) {
+                        const data = JSON.parse(cleanText);
+                        
+                        if (data.type === 'multi_step_plan') {
+                            const totalDays = data.steps.filter(s => s.type === 'header').length;
+                            
+                            if (totalDays > 1) {
+                                return (
+                                    <div className="absolute top-8 left-1/2 transform -translate-x-1/2 z-[1000] bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-xl border border-slate-200/50 flex gap-1">
+                                        {Array.from({ length: totalDays }, (_, i) => i + 1).map(day => (
+                                            <button
+                                                key={day}
+                                                onClick={() => setActiveDay(day)}
+                                                className={`px-4 py-2 rounded-xl text-sm font-bold transition-all shadow-sm ${
+                                                    activeDay === day 
+                                                    ? 'bg-slate-800 text-white scale-105' 
+                                                    : 'bg-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                                                }`}
+                                            >
+                                                Tag {day}
+                                            </button>
+                                        ))}
+                                    </div>
+                                );
+                            }
+                        }
+                    }
+                } catch (e) { }
+            }
+            return null;
+        })()}
+        
       </div>
+
     </div>
   );
+
+  
 }

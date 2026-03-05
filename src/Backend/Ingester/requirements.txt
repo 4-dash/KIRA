@@ -2,7 +2,10 @@ opensearch-py
 beautifulsoup4
 lxml
 sentence-transformers
+shapely
 
+# LlamaIndex Core and Connectors
 llama-index
+llama-index-embeddings-azure-openai
 llama-index-embeddings-huggingface
 llama-index-vector-stores-opensearch

@@ -17,20 +17,20 @@ from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.vector_stores.opensearch import OpensearchVectorStore, OpensearchVectorClient
 
 # --- Konfiguration ---
-OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "localhost")
+OPENSEARCH_HOST = os.getenv("OPENSEARCH_HOST", "opensearch")
 OPENSEARCH_PORT = int(os.getenv("OPENSEARCH_PORT", "9200"))
 OPENSEARCH_AUTH = None
 
 INDEX_NAME = os.getenv("POI_INDEX", "tourism-data-v-working")
 
-DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "../api-gateway/bayerncloud-data")
+DATA_DIR = os.getenv("BAYERNCLOUD_DATA_DIR", "/data/bayerncloud")
 FILE_PATTERN = os.getenv("BAYERNCLOUD_FILE_PATTERN", "bayerncloud*.json")
 
 # Azure OpenAI Specifics
-AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY", "")
-AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
-AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME", "")
-AZURE_API_VERSION = os.getenv("AZURE_API_VERSION", "")
+AZURE_OPENAI_KEY_EMB = os.getenv("AZURE_OPENAI_API_KEY_EMB", "")
+AZURE_OPENAI_ENDPOINT_EMB = os.getenv("AZURE_OPENAI_ENDPOINT_EMB", "")
+AZURE_DEPLOYMENT_NAME_EMB = os.getenv("AZURE_DEPLOYMENT_NAME_EMB", "")
+AZURE_API_VERSION_EMB = os.getenv("AZURE_OPENAI_API_VERSION_EMB", "")
 
 # text-embedding-3-large uses 3072 dimensions
 EMBED_DIM = int(os.getenv("EMBED_DIM", "3072"))
@@ -40,20 +40,20 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- LlamaIndex Settings ---
-logger.info(f"Lade Azure OpenAI Embedding Modell: {AZURE_DEPLOYMENT_NAME}...")
+logger.info(f"Lade Azure OpenAI Embedding Modell: {AZURE_DEPLOYMENT_NAME_EMB}...")
 embed_model = AzureOpenAIEmbedding(
-    model="text-embedding-3-large",
-    deployment_name=AZURE_DEPLOYMENT_NAME,
-    api_key=AZURE_OPENAI_KEY,
-    azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    api_version=AZURE_API_VERSION,
+    model=AZURE_DEPLOYMENT_NAME_EMB,
+    deployment_name=AZURE_DEPLOYMENT_NAME_EMB,
+    api_key=AZURE_OPENAI_KEY_EMB,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT_EMB,
+    api_version=AZURE_API_VERSION_EMB,
 )
 
 Settings.embed_model = embed_model
 Settings.llm = None 
 
 # WICHTIG: Chunk Size erhöhen, damit alle Metadaten reinpassen!
-Settings.chunk_size = 2048
+Settings.chunk_size = 2048 
 Settings.chunk_overlap = 50
 
 # --- Helfer ---
@@ -66,89 +66,6 @@ def clean_html(text: str) -> str:
         return soup.get_text(separator=" ").strip()
     except Exception:
         return str(text)
-
-def format_opening_hours(ohs_data: Any) -> str:
-    """
-    Robust extractor:
-    1. Prioritizes structured times (Mo-Fr: 08:00-12:00).
-    2. Falls back to clean description text if no times exist.
-    3. HARD TRUNCATES to 1000 chars to prevent 'Metadata length' errors.
-    """
-    if not ohs_data:
-        return ""
-    
-    if isinstance(ohs_data, dict):
-        ohs_data = [ohs_data]
-        
-    structured_entries = []
-    description_entries = []
-    seen_entries = set()
-    
-    day_map = {
-        "Monday": "Mo", "Tuesday": "Di", "Wednesday": "Mi", "Thursday": "Do", 
-        "Friday": "Fr", "Saturday": "Sa", "Sunday": "So"
-    }
-
-    for item in ohs_data:
-        # --- Attempt 1: Structured Data (Preferred) ---
-        if item.get('opens') and item.get('closes'):
-            try:
-                # Safely slice times (handle cases like '10:00:00' or just '10:00')
-                start = str(item['opens'])[:5]
-                end = str(item['closes'])[:5]
-                
-                # Parse Days
-                raw_days = item.get('dayOfWeek', [])
-                if isinstance(raw_days, str): raw_days = [raw_days]
-                
-                clean_days = []
-                for d in raw_days:
-                    # Handle both URLs (schema.org/Monday) and plain text
-                    name = str(d).split('/')[-1]
-                    clean_days.append(day_map.get(name, name))
-                
-                clean_days.sort() 
-                
-                if len(clean_days) == 7:
-                    day_str = "Täglich"
-                elif not clean_days:
-                    day_str = "Zeiten"
-                else:
-                    day_str = ", ".join(clean_days)
-
-                entry = f"{day_str}: {start}-{end}"
-                
-                if entry not in seen_entries:
-                    structured_entries.append(entry)
-                    seen_entries.add(entry)
-                
-                # If we found structured data, we don't need the generic description for this item
-                continue 
-            except Exception:
-                pass # Fallback to description on error
-
-        # --- Attempt 2: Description Fallback ---
-        # Only use this if we couldn't get structured times for this item
-        if item.get('description'):
-            clean_text = clean_html(item['description'])
-            # Avoid duplicate generic descriptions
-            if clean_text and clean_text not in description_entries:
-                description_entries.append(clean_text)
-
-    # Combine: Prefer structured. If none, show descriptions.
-    # We join structured first, then descriptions if space permits (or if no structured exists)
-    full_text = ""
-    if structured_entries:
-        full_text = " | ".join(structured_entries)
-    elif description_entries:
-        full_text = " | ".join(description_entries)
-        
-    # --- SAFETY VALVE: Hard Limit ---
-    # Truncate to 1000 chars. This ensures metadata NEVER causes a chunk size error.
-    if len(full_text) > 1000:
-        return full_text[:997] + "..."
-        
-    return full_text
 
 def safe_float(value):
     try:
@@ -194,8 +111,6 @@ class RichLlamaIngestor:
                             "engine": "faiss"
                         }
                     },
-                    "website": {"type": "keyword"},
-                    "telephone": {"type": "keyword"},
                     "source_id": {"type": "keyword"},
                     "city": {"type": "keyword"},
                     "type": {"type": "keyword"},
@@ -240,8 +155,8 @@ class RichLlamaIngestor:
             metadata['city'] = address.get('addressLocality', '')
             metadata['country'] = address.get('addressCountry', '')
         
-        metadata['website'] = raw_doc.get('url') or raw_doc.get('address', {}).get('url')
-        metadata['telephone'] = raw_doc.get('telephone') or raw_doc.get('address', {}).get('telephone')
+        metadata['website'] = raw_doc.get('url')
+        metadata['telephone'] = raw_doc.get('telephone')
 
         if not text_content:
             text_content = f"{metadata['type']} namens {metadata['name']} in {metadata.get('city', 'Bayern')}."
@@ -289,7 +204,8 @@ class RichLlamaIngestor:
         # -----------------------------------------------------
 
         ohs = raw_doc.get('openingHoursSpecification')
-        metadata['openingHoursSpecification'] = format_opening_hours(ohs)
+        if ohs:
+            metadata['openingHoursSpecification'] = str(ohs)[:1000] 
 
         # 3. Document erstellen
         doc = Document(
@@ -301,8 +217,7 @@ class RichLlamaIngestor:
                 'website', 
                 'telephone',
                 'geo_line', 
-                'location',
-                'openingHoursSpecification'
+                'location'
             ],
             
             excluded_llm_metadata_keys=[

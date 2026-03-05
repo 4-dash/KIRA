@@ -1,0 +1,17 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-dotenv>=1.0
+requests>=2.31
+opensearch-py>=2.4
+openai>=1.30
+
+# MCP / agent server deps (kept because monolith imports MCP/agent_server.py)
+fastmcp>=0.3
+mcp>=1.0
+llama-index>=0.11
+llama-index-core>=0.11
+llama-index-llms-azure-openai>=0.2
+llama-index-embeddings-azure-openai>=0.2
+llama-index-vector-stores-opensearch>=0.3
+llama-index-embeddings-huggingface>=0.2
+sentence-transformers>=2.6
