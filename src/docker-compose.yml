@@ -30,7 +30,7 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - os_data:/usr/share/opensearch/data
+      - opensearch-data:/usr/share/opensearch/data
     ports:
       - "9200:9200"
       - "9600:9600"
@@ -38,7 +38,7 @@ services:
 
   opensearch-dashboards:
     image: opensearchproject/opensearch-dashboards:latest
-    container_name: os-dashboards
+    container_name: opensearch-dashboard
     restart: unless-stopped
     environment:
       - 'OPENSEARCH_HOSTS=["http://opensearch:9200"]'
@@ -114,5 +114,7 @@ services:
     restart: "no"
 
 volumes:
-  os_data:
+  opensearch-data:
+    external: true
+    name: kira-project_os_data
   bc-data:
