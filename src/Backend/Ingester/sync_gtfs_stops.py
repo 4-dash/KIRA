@@ -51,35 +51,35 @@ query = """
   }
 }
 """
+try:
+    print(f"Fetching stops from OTP2: {OTP_URL}")
+    response = requests.post(OTP_URL, json={"query": query}, timeout=60)
+    response.raise_for_status()
 
-print(f"Fetching stops from OTP2: {OTP_URL}")
-response = requests.post(OTP_URL, json={"query": query}, timeout=60)
-response.raise_for_status()
+    data = response.json()
+    stops = data["data"]["stops"]
+    print(f"Found {len(stops)} stops. Indexing to OpenSearch...")
 
-data = response.json()
-stops = data["data"]["stops"]
-print(f"Found {len(stops)} stops. Indexing to OpenSearch...")
-
-actions = []
-for stop in stops:
-    actions.append(
-        {
-            "_index": INDEX_NAME,
-            "_id": stop["gtfsId"],
-            "_source": {
-                "name": stop["name"],
-                "code": stop["code"],
-                "location": {
-                    "latitude": stop["lat"],
-                    "longitude": stop["lon"],
-                    "geo": f'{stop["lat"]},{stop["lon"]}',
+    actions = []
+    for stop in stops:
+        actions.append(
+            {
+                "_index": INDEX_NAME,
+                "_id": stop["gtfsId"],
+                "_source": {
+                    "name": stop["name"],
+                    "code": stop["code"],
+                    "location": {
+                        "latitude": stop["lat"],
+                        "longitude": stop["lon"],
+                        "geo": f'{stop["lat"]},{stop["lon"]}',
+                    },
                 },
-            },
-        }
-    )
+            }
+        )
 
-success, failed = helpers.bulk(client, actions)
-print(f"Success! Indexed {success} stops.")
+    success, failed = helpers.bulk(client, actions)
+    print(f"Success! Indexed {success} stops.")
 
 except Exception as e:
     print(f"Connection Error: {e}")

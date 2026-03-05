@@ -3,6 +3,7 @@ beautifulsoup4
 lxml
 sentence-transformers
 shapely
+requests
 
 # LlamaIndex Core and Connectors
 llama-index
