@@ -101,5 +101,3 @@ services:
 volumes:
   os-data:
   bc-data:
-  neo4j_data:
-  neo4j_logs:
