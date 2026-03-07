@@ -4,8 +4,7 @@ WORKDIR /app
 
 COPY package*.json ./
 
-# IMPORTANT: rollup native is an OPTIONAL dependency
-RUN npm ci --include=optional || npm install --include=optional
+RUN npm install --include=optional --no-audit --no-fund
 
 COPY . .
 

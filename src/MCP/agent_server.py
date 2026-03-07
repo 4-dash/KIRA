@@ -225,83 +225,155 @@ def get_coords(target_name: str):
     
     return None, None
 
-def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time):
-    # UPDATE: "Ultra-Lazy-Mode"
-    # Wir erlauben weite Wege zur Haltestelle (5km), damit er das Naturschutzgebiet erreicht.
-    # ABER: Wir setzen walkReluctance auf 500! Das ist astronomisch hoch.
-    # Das zwingt den Router, jeden Meter Fußweg zu vermeiden, wenn IRGENDWIE ein Bus fährt.
-    
-    query = """
-    query PlanTrip($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!, $date: String!, $time: String!) {
+
+
+def parse_time_str(time_str: str):
+    try:
+        base = datetime.now()
+        if time_str and "tomorrow" in time_str.lower():
+            base = base + timedelta(days=1)
+        if time_str and ":" in time_str:
+            parts = time_str.split()
+            hh, mm = map(int, parts[-1].split(':'))
+            base = base.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        else:
+            base = base.replace(hour=7, minute=30, second=0, microsecond=0)
+        return base
+    except Exception:
+        return datetime.now().replace(hour=7, minute=30, second=0, microsecond=0)
+
+
+def _mode_object_literal(mode: str) -> str:
+    mode = (mode or '').upper()
+    if mode in {'TRANSIT', 'CAR', 'BICYCLE', 'WALK'}:
+        return f'{{mode: {mode}}}'
+    return '{mode: TRANSIT}'
+
+
+def build_route_preferences(route_preferences=None):
+    prefs = dict(route_preferences or {})
+    primary_mode = str(prefs.get('primary_mode') or '').upper()
+    allowed_modes = prefs.get('allowed_modes') or []
+    allowed_modes = [str(m).upper() for m in allowed_modes if m]
+
+    if not allowed_modes:
+        if primary_mode == 'CAR':
+            allowed_modes = ['CAR']
+        elif primary_mode == 'BICYCLE':
+            allowed_modes = ['BICYCLE', 'WALK']
+        elif primary_mode == 'WALK':
+            allowed_modes = ['WALK']
+        else:
+            allowed_modes = ['WALK', 'TRANSIT']
+
+    if primary_mode and primary_mode not in allowed_modes:
+        allowed_modes.insert(0, primary_mode)
+
+    seen = set()
+    allowed_modes = [m for m in allowed_modes if not (m in seen or seen.add(m))]
+
+    transport_modes_literal = '[' + ', '.join(_mode_object_literal(m) for m in allowed_modes) + ']'
+    compiled = {
+        'primary_mode': primary_mode or None,
+        'allowed_modes': allowed_modes,
+        'transport_modes_literal': transport_modes_literal,
+        'arrive_by': bool(prefs.get('arrive_by', False)),
+        'wheelchair': bool(prefs.get('wheelchair_accessible', prefs.get('wheelchair', False))),
+        'avoid_transfers': bool(prefs.get('avoid_transfers', False)),
+        'walk_reluctance': float(prefs.get('walk_reluctance', 4.0 if primary_mode not in {'WALK', 'BICYCLE'} else 1.5)),
+        'wait_reluctance': float(prefs.get('wait_reluctance', 1.2)),
+        'transfer_penalty': int(float(prefs.get('transfer_penalty', 900 if prefs.get('avoid_transfers') else 180))),
+        'max_walk_distance': float(prefs.get('max_walk_distance', 2500.0 if primary_mode not in {'WALK', 'BICYCLE'} else 5000.0)),
+        'min_transfer_time': int(float(prefs.get('min_transfer_time', 180 if prefs.get('avoid_transfers') else 120))),
+        'max_transfers': int(prefs.get('max_transfers', 1 if prefs.get('avoid_transfers') else 2)),
+        'num_itineraries': int(prefs.get('num_itineraries', 1 if prefs.get('avoid_transfers') else 3)),
+    }
+    return compiled
+
+
+def _format_otp_graphql_errors(payload):
+    errors = payload.get('errors') or []
+    if not errors:
+        return None
+    parts = []
+    for err in errors:
+        if isinstance(err, dict):
+            msg = err.get('message') or json.dumps(err, ensure_ascii=False)
+        else:
+            msg = str(err)
+        parts.append(msg)
+    return '; '.join(parts)
+
+
+def query_otp_api(from_lat, from_lon, to_lat, to_lon, departure_time, route_preferences=None):
+    prefs = build_route_preferences(route_preferences)
+    query = f"""
+    query PlanTrip($fromLat: Float!, $fromLon: Float!, $toLat: Float!, $toLon: Float!, $date: String!, $time: String!) {{
       plan(
-        from: {lat: $fromLat, lon: $fromLon}
-        to: {lat: $toLat, lon: $toLon}
+        from: {{lat: $fromLat, lon: $fromLon}}
+        to: {{lat: $toLat, lon: $toLon}}
         date: $date
         time: $time
-        numItineraries: 3
-        transportModes: [
-        {mode: WALK},
-        {mode: TRANSIT},
-        {mode: CAR},
-        {mode: CAR, qualifier: PARK},
-        {mode: CAR, qualifier: RENT},
-        {mode: BICYCLE},
-        {mode: BICYCLE, qualifier: RENT}
-        ]
-        walkReluctance: 500.0    # <--- EXTREM! Laufen ist der absolute Feind.
-        waitReluctance: 0.1      # <--- Warten ist okay.
-        maxWalkDistance: 5000.0  # <--- Radius groß genug für abgelegene Ziele.
-        maxBikeDistance: 20000
-      ) {
-        itineraries {
+        numItineraries: {prefs['num_itineraries']}
+        transportModes: {prefs['transport_modes_literal']}
+        walkReluctance: {prefs['walk_reluctance']}
+        waitReluctance: {prefs['wait_reluctance']}
+        transferPenalty: {prefs['transfer_penalty']}
+        maxWalkDistance: {prefs['max_walk_distance']}
+        minTransferTime: {prefs['min_transfer_time']}
+        maxTransfers: {prefs['max_transfers']}
+        arriveBy: {'true' if prefs['arrive_by'] else 'false'}
+        wheelchair: {'true' if prefs['wheelchair'] else 'false'}
+      ) {{
+        itineraries {{
           duration
-          legs {
+          legs {{
             mode
             startTime
             endTime
             duration
-            legGeometry { points }
-            route { shortName longName }
-            from { name lat lon }
-            to { name lat lon }
-            intermediateStops { name lat lon }
-          }
-        }
-      }
-    }
+            legGeometry {{ points }}
+            route {{ shortName longName }}
+            from {{ name lat lon }}
+            to {{ name lat lon }}
+            intermediateStops {{ name lat lon }}
+          }}
+        }}
+      }}
+    }}
     """
-    
+
     variables = {
-        "fromLat": from_lat, "fromLon": from_lon,
-        "toLat": to_lat, "toLon": to_lon,
-        "date": departure_time.strftime("%Y-%m-%d"),
-        "time": departure_time.strftime("%H:%M")
+        'fromLat': from_lat,
+        'fromLon': from_lon,
+        'toLat': to_lat,
+        'toLon': to_lon,
+        'date': departure_time.strftime('%Y-%m-%d'),
+        'time': departure_time.strftime('%H:%M:%S'),
     }
-    
     try:
-        response = requests.post(OTP_URL, json={"query": query, "variables": variables}, timeout=60)
-        return response.json()
+        response = requests.post(OTP_URL, json={'query': query, 'variables': variables}, timeout=60)
+        response.raise_for_status()
+        payload = response.json()
+        err = _format_otp_graphql_errors(payload)
+        if err:
+            return {'error': f'Routing fehlgeschlagen: {err}', 'raw': payload}
+        return payload
     except Exception as e:
         sys.stderr.write(f"[ERROR] OTP Anfrage fehlgeschlagen: {e}\n")
-        return {"error": str(e)}
+        return {'error': str(e)}
 
-def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30", 
-                       start_coords_override=None, end_coords_override=None) -> str:
-    # 1. Datum parsen
-    try:
-        trip_time = datetime.now()
-        if "tomorrow" in time_str.lower():
-            trip_time = trip_time + timedelta(days=1)
-            parts = time_str.split()
-            if len(parts) > 1 and ":" in parts[-1]:
-                h, m = map(int, parts[-1].split(':'))
-                trip_time = trip_time.replace(hour=h, minute=m, second=0)
-            else:
-                trip_time = trip_time.replace(hour=7, minute=30)
-    except:
-        return json.dumps({"error": "Datumsfehler"})
 
-    # 2. Koordinaten bestimmen (Entweder Override nutzen oder suchen)
+def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30",
+                       start_coords_override=None, end_coords_override=None,
+                       route_preferences=None, selection=None) -> str:
+    trip_time = parse_time_str(time_str)
+
+    if selection and not start_coords_override:
+        coords = selection.get("replacement_coords") or selection.get("coords")
+        if coords and selection.get("selection_type") in {"stop", "activity"}:
+            end_coords_override = (coords[0], coords[1])
+
     if start_coords_override:
         start_lat, start_lon = start_coords_override
     else:
@@ -315,63 +387,57 @@ def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30",
     if not start_lat or not end_lat:
         return json.dumps({"error": f"Koordinaten nicht gefunden für {start} oder {end}"})
 
-    # 3. OTP abfragen
-    data = query_otp_api(start_lat, start_lon, end_lat, end_lon, trip_time)
+    prefs = build_route_preferences(route_preferences)
+    data = query_otp_api(start_lat, start_lon, end_lat, end_lon, trip_time, route_preferences=prefs)
 
-    # 4. JSON bauen
+    if data and data.get('error'):
+        return json.dumps({'error': data.get('error'), 'query_preferences': prefs})
+
     if data and data.get('data') and data['data'].get('plan') and data['data']['plan'].get('itineraries'):
         itin = data['data']['plan']['itineraries'][0]
-        
         frontend_data = {
             "start": start,
             "end": end,
             "date": trip_time.strftime("%d.%m.%Y"),
             "total_duration": int(itin['duration'] / 60),
+            "query_preferences": prefs,
+            "selection": selection,
             "legs": []
         }
-
         for leg in itin['legs']:
             mode = leg['mode']
             start_t = datetime.fromtimestamp(leg['startTime'] / 1000).strftime('%H:%M')
             end_t = datetime.fromtimestamp(leg['endTime'] / 1000).strftime('%H:%M')
-            
             line_name = ""
             if leg.get('route'):
                 line_name = leg['route'].get('shortName') or leg['route'].get('longName') or ""
-
-            # Start & Ziel
             from_node = leg['from']
             to_node = leg['to']
             from_name = from_node['name']
             to_name = to_node['name']
             from_coords = [from_node['lat'], from_node['lon']]
             to_coords = [to_node['lat'], to_node['lon']]
-
             if from_name == "Origin": from_name = start
             if to_name == "Destination": to_name = end
-            
-            # Geometrie
             geometry = ""
-            if leg.get('legGeometry'): geometry = leg['legGeometry'].get('points', "")
-
+            if leg.get('legGeometry'):
+                geometry = leg['legGeometry'].get('points', "")
             frontend_data["legs"].append({
                 "mode": mode,
                 "from": from_name,
                 "to": to_name,
                 "from_coords": from_coords,
                 "to_coords": to_coords,
-                "stops": [], 
+                "stops": leg.get('intermediateStops') or [],
                 "start_time": start_t,
                 "end_time": end_t,
                 "line": line_name,
                 "duration": int(leg['duration'] / 60),
-                "geometry": geometry 
+                "geometry": geometry
             })
-
         return json.dumps(frontend_data)
-    else:
-        return json.dumps({"error": "Keine Verbindung gefunden"})
-    
+    return json.dumps({'error': 'Keine Verbindung gefunden', 'query_preferences': prefs, 'otp_response': data})
+
 def plan_activities_logic(location: str, interest: str = "") -> str:
     if not activity_retriever:
         return json.dumps({"error": "Datenbank nicht verbunden."})
@@ -503,7 +569,7 @@ def plan_activities_logic(location: str, interest: str = "") -> str:
         sys.stderr.write(f"[ERROR] DB-Fehler in plan_activities: {e}\n")
         return json.dumps({"error": str(e)})
     
-def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int = 2, avoid_places: list = None) -> str:
+def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int = 2, avoid_places: list = None, route_preferences=None, selection=None) -> str:
     if avoid_places is None: avoid_places = []
     sys.stderr.write(f"[LOGIC] Plane Rundreise: {start} -> {end} ({interest}) -> {start}\n")
     
@@ -580,7 +646,8 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
         # 1. ECHTE ANREISE (Bus/Bahn)
         trip_json = plan_journey_logic(
             start=current_name, end=stop_name, time_str=time_str_dynamic,
-            start_coords_override=current_coords, end_coords_override=stop_coords
+            start_coords_override=current_coords, end_coords_override=stop_coords,
+            route_preferences=route_preferences, selection=selection
         )
         trip_data = json.loads(trip_json)
         
@@ -643,7 +710,8 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
     
     final_trip_json = plan_journey_logic(
         start=current_name, end=start, time_str=time_str_return,
-        start_coords_override=current_coords, end_coords_override=start_coords
+        start_coords_override=current_coords, end_coords_override=start_coords,
+        route_preferences=route_preferences, selection=selection
     )
     final_trip_data = json.loads(final_trip_json)
     
@@ -659,12 +727,14 @@ def plan_complete_trip_logic(start: str, end: str, interest: str, num_stops: int
     result = {
         "type": "multi_step_plan",
         "intro": intro_msg,
+        "query_preferences": build_route_preferences(route_preferences),
+        "selection": selection,
         "steps": steps
     }
     
     return json.dumps(result)
 
-def plan_multiday_trip_logic(start: str, end: str, days: int = 4, hotel_pref: str = "Hotel Unterkunft Central", activity_pref: str = "Wandern Natur Freizeit", food_pref: str = "Restaurant Gaststätte", culture_pref: str = "Museum", avoid_places: list = None) -> str:
+def plan_multiday_trip_logic(start: str, end: str, days: int = 4, hotel_pref: str = "Hotel Unterkunft Central", activity_pref: str = "Wandern Natur Freizeit", food_pref: str = "Restaurant Gaststätte", culture_pref: str = "Museum", avoid_places: list = None, route_preferences=None, selection=None) -> str:
     if avoid_places is None: avoid_places = []
     if days < 1: days = 1
     
@@ -752,7 +822,8 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4, hotel_pref: st
 
         trip_json = plan_journey_logic(
             start=origin_name, end=dest_name, time_str=time_str,
-            start_coords_override=origin_coords, end_coords_override=dest_coords      
+            start_coords_override=origin_coords, end_coords_override=dest_coords,
+            route_preferences=route_preferences, selection=selection
         )
         trip_data = json.loads(trip_json)
         
@@ -875,6 +946,8 @@ def plan_multiday_trip_logic(start: str, end: str, days: int = 4, hotel_pref: st
     result = {
         "type": "multi_step_plan",
         "intro": intro_text,
+        "query_preferences": build_route_preferences(route_preferences),
+        "selection": selection,
         "steps": steps
     }
     
