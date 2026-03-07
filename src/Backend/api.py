@@ -52,6 +52,20 @@ os_client = OpenSearch(
     connection_class=RequestsHttpConnection,
 )
 
+SESSION_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+def get_session_state(session_id: Optional[str]) -> Dict[str, Any]:
+    key = session_id or 'anonymous'
+    if key not in SESSION_STATE:
+        SESSION_STATE[key] = {
+            'current_trip': None,
+            'selection': None,
+            'route_preferences': {},
+            'last_error': None,
+        }
+    return SESSION_STATE[key]
+
 
 @app.post("/api/save_trip")
 async def save_trip(request: Request):
@@ -133,10 +147,11 @@ EDIT_OPERATION_SCHEMA: Dict[str, Any] = {
                 "regenerate_leg",
                 "reroute_day",
                 "move_activity",
+                "replace_activity",
                 "apply_route_preferences",
             ],
         },
-        "scope": {"type": "string", "enum": ["trip", "day", "step", "leg", "activity"]},
+        "scope": {"type": "string", "enum": ["trip", "day", "step", "leg", "activity", "stop"]},
     },
 }
 
@@ -252,10 +267,11 @@ def normalize_ws_payload(raw_text: str) -> Dict[str, Any]:
     try:
         payload = json.loads(raw_text)
         if isinstance(payload, dict) and payload.get("type") == "chat_request":
+            payload.setdefault("session_id", None)
             return payload
     except Exception:
         pass
-    return {"type": "chat_request", "text": raw_text}
+    return {"type": "chat_request", "text": raw_text, "session_id": None}
 
 
 # ----------------------
@@ -340,7 +356,7 @@ def infer_edit_operation(payload: Dict[str, Any], route_preferences: Dict[str, A
         if drag_override:
             return {"operation": "move_activity", "scope": "activity", "route_preferences": route_preferences}
         if any(word in text for word in ["ersetz", "replace", "ander", "andere"]):
-            return {"operation": "move_activity", "scope": "activity", "route_preferences": route_preferences}
+            return {"operation": "replace_activity", "scope": "activity", "route_preferences": route_preferences}
         return {"operation": "apply_route_preferences", "scope": "activity", "route_preferences": route_preferences}
     if selection_type == "trip":
         return {"operation": "regenerate_trip", "scope": "trip", "route_preferences": route_preferences}
@@ -349,6 +365,31 @@ def infer_edit_operation(payload: Dict[str, Any], route_preferences: Dict[str, A
     if selection_type == "day":
         return {"operation": "reroute_day", "scope": "day", "route_preferences": route_preferences}
     return None
+
+
+def normalize_explicit_edit_operation(payload: Dict[str, Any], route_preferences: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    edit_operation = payload.get("edit_operation") or {}
+    if not isinstance(edit_operation, dict) or not edit_operation.get("operation"):
+        return None
+    normalized = {
+        "operation": edit_operation.get("operation"),
+        "scope": edit_operation.get("scope") or (payload.get("selection") or {}).get("selection_type"),
+        "route_preferences": route_preferences,
+    }
+    return normalized
+
+
+def update_session_from_result(session_state: Dict[str, Any], result_str: str, selection: Optional[Dict[str, Any]] = None) -> None:
+    parsed = parse_json_result(result_str)
+    if isinstance(parsed, dict):
+        if parsed.get("legs") or parsed.get("type") in {"multi_step_plan", "activity_list"}:
+            session_state["current_trip"] = parsed
+        if parsed.get("type") == "error" or parsed.get("error"):
+            session_state["last_error"] = parsed.get("message") or parsed.get("error")
+        else:
+            session_state["last_error"] = None
+    if selection is not None:
+        session_state["selection"] = selection
 
 
 def build_contextual_user_prompt(payload: Dict[str, Any]) -> str:
@@ -574,6 +615,39 @@ def update_adjacent_trips_for_activity(
     return updated
 
 
+def replace_activity_in_plan(
+    plan_data: Dict[str, Any],
+    step_index: int,
+    selection: Dict[str, Any],
+    route_preferences: Dict[str, Any],
+    user_text: str,
+) -> Dict[str, Any]:
+    updated = copy.deepcopy(plan_data)
+    steps = updated.get("steps", [])
+    if step_index < 0 or step_index >= len(steps) or steps[step_index].get("type") != "activity":
+        return {"type": "error", "message": "Ausgewählte Aktivität nicht gefunden."}
+
+    current_activity = steps[step_index].get("data", {})
+    location_hint = current_activity.get("city") or current_activity.get("location") or current_activity.get("name")
+    search_interest = user_text.strip() or current_activity.get("category") or "Highlights"
+    try:
+        candidates = parse_json_result(plan_activities_logic(location_hint, search_interest))
+    except Exception as exc:
+        return {"type": "error", "message": f"Ersatzaktivität konnte nicht gesucht werden: {exc}"}
+
+    items = candidates.get("items") or []
+    replacement = None
+    for item in items:
+        if item.get("name") and item.get("name") != current_activity.get("name"):
+            replacement = item
+            break
+    if not replacement:
+        return {"type": "error", "message": "Keine passende Ersatzaktivität gefunden."}
+
+    steps[step_index]["data"] = replacement
+    return update_adjacent_trips_for_activity(updated, step_index, steps[step_index], route_preferences, {"coords": [replacement["lat"], replacement["lon"]]}, selection)
+
+
 def apply_deterministic_edit(payload: Dict[str, Any]) -> Optional[str]:
     current_trip = payload.get("current_trip")
     selection = payload.get("selection") or {}
@@ -583,7 +657,7 @@ def apply_deterministic_edit(payload: Dict[str, Any]) -> Optional[str]:
 
     existing_prefs = dict(current_trip.get("query_preferences") or {})
     route_preferences = extract_route_preferences_from_text(payload.get("text", ""), existing_prefs)
-    operation = infer_edit_operation(payload, route_preferences)
+    operation = normalize_explicit_edit_operation(payload, route_preferences) or infer_edit_operation(payload, route_preferences)
     if not operation:
         return None
 
@@ -638,6 +712,12 @@ def apply_deterministic_edit(payload: Dict[str, Any]) -> Optional[str]:
         updated["query_preferences"] = dict(updated.get("query_preferences") or {}) | route_preferences
         return json.dumps(updated, ensure_ascii=False)
 
+    if operation["operation"] == "replace_activity" and updated.get("type") == "multi_step_plan":
+        step_index = selection.get("step_index")
+        if not isinstance(step_index, int):
+            return None
+        return json.dumps(replace_activity_in_plan(updated, step_index, selection, route_preferences, payload.get("text", "")), ensure_ascii=False)
+
     if operation["operation"] in {"move_activity", "apply_route_preferences"} and updated.get("type") == "multi_step_plan":
         step_index = selection.get("step_index")
         if not isinstance(step_index, int):
@@ -676,9 +756,14 @@ async def websocket_endpoint(websocket: WebSocket):
             raw_input = await websocket.receive_text()
             payload = normalize_ws_payload(raw_input)
             print(f"📩 User: {payload.get('text', '')}")
+            session_state = get_session_state(payload.get("session_id"))
+            payload.setdefault("selection", session_state.get("selection"))
+            if not payload.get("current_trip") and session_state.get("current_trip"):
+                payload["current_trip"] = session_state.get("current_trip")
 
             deterministic_result = apply_deterministic_edit(payload)
             if deterministic_result is not None:
+                update_session_from_result(session_state, deterministic_result, payload.get("selection"))
                 await websocket.send_text(deterministic_result)
                 continue
 
@@ -704,24 +789,33 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"⚙️ Tool: {func_name}")
                         result_str = ""
 
-                        if func_name == "find_best_city":
-                            city = find_best_city_logic(**args)
-                            result_str = f"City found: {city}. Now call a planning tool for {city}."
-                        else:
-                            args.pop("edit_operation", None)
-                            if func_name == "get_simple_route":
-                                result_str = plan_journey_logic(**args)
-                            elif func_name == "search_local_places":
-                                args.pop("route_preferences", None)
-                                args.pop("selection", None)
-                                result_str = plan_activities_logic(**args)
-                            elif func_name == "plan_single_day_trip":
+                        try:
+                            if func_name == "find_best_city":
+                                city = find_best_city_logic(**args)
+                                result_str = f"City found: {city}. Now call a planning tool for {city}."
+                            else:
                                 args.pop("edit_operation", None)
-                                result_str = plan_complete_trip_logic(**args)
-                            elif func_name == "plan_multiday_trip":
-                                args.pop("edit_operation", None)
-                                result_str = plan_multiday_trip_logic(**args)
+                                if func_name == "get_simple_route":
+                                    result_str = plan_journey_logic(**args)
+                                elif func_name == "search_local_places":
+                                    args.pop("route_preferences", None)
+                                    args.pop("selection", None)
+                                    result_str = plan_activities_logic(**args)
+                                elif func_name == "plan_single_day_trip":
+                                    args.pop("edit_operation", None)
+                                    result_str = plan_complete_trip_logic(**args)
+                                elif func_name == "plan_multiday_trip":
+                                    args.pop("edit_operation", None)
+                                    result_str = plan_multiday_trip_logic(**args)
+                                else:
+                                    result_str = json.dumps({"type": "error", "message": f"Unbekanntes Tool: {func_name}"}, ensure_ascii=False)
 
+                                update_session_from_result(session_state, result_str, payload.get("selection"))
+                                await websocket.send_text(result_str)
+                                should_break_loop = True
+                        except Exception as exc:
+                            result_str = json.dumps({"type": "error", "message": f"Tool-Ausführung fehlgeschlagen ({func_name}): {exc}"}, ensure_ascii=False)
+                            session_state["last_error"] = str(exc)
                             await websocket.send_text(result_str)
                             should_break_loop = True
 
@@ -738,8 +832,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     final_text = response_msg.content
                     if final_text:
+                        session_state["selection"] = payload.get("selection")
                         await websocket.send_text(final_text)
                     break
 
     except WebSocketDisconnect:
         print("❌ Frontend getrennt")
+    except Exception as exc:
+        print(f"❌ WebSocket Fehler: {exc}")
+        try:
+            await websocket.send_text(json.dumps({"type": "error", "message": f"Backend-Fehler: {exc}"}, ensure_ascii=False))
+        except Exception:
+            pass

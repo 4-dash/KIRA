@@ -152,7 +152,73 @@ function buildSelectionPayload({ kind, messageId, planData, step, leg, dayIndex,
   return null;
 }
 
-function SelectionBanner({ selection, dragOverride, onClear }) {
+function inferOperationFromSelection(selection, userText = '', dragOverride = null) {
+  if (!selection) return null;
+  const text = (userText || '').toLowerCase();
+  if (selection.selection_type === 'leg') {
+    return { operation: 'regenerate_leg', scope: 'leg' };
+  }
+  if (selection.selection_type === 'day') {
+    return { operation: 'reroute_day', scope: 'day' };
+  }
+  if (selection.selection_type === 'step') {
+    return { operation: 'regenerate_step', scope: 'step' };
+  }
+  if (selection.selection_type === 'trip') {
+    return { operation: 'regenerate_trip', scope: 'trip' };
+  }
+  if (selection.selection_type === 'activity') {
+    if (dragOverride) return { operation: 'move_activity', scope: 'activity' };
+    if (text.includes('ersetz') || text.includes('replace') || text.includes('andere')) {
+      return { operation: 'replace_activity', scope: 'activity' };
+    }
+    return { operation: 'apply_route_preferences', scope: 'activity' };
+  }
+  return null;
+}
+
+function SelectionActions({ selection, pendingOperation, onChooseOperation }) {
+  if (!selection) return null;
+  const buttons = [];
+  if (selection.selection_type === 'trip') {
+    buttons.push({ operation: 'regenerate_trip', label: 'Trip neu berechnen' });
+  }
+  if (selection.selection_type === 'day') {
+    buttons.push({ operation: 'reroute_day', label: 'Tag neu berechnen' });
+  }
+  if (selection.selection_type === 'step') {
+    buttons.push({ operation: 'regenerate_step', label: 'Schritt neu berechnen' });
+  }
+  if (selection.selection_type === 'leg') {
+    buttons.push({ operation: 'regenerate_leg', label: 'Leg neu berechnen' });
+    buttons.push({ operation: 'apply_route_preferences', label: 'Präferenzen anwenden' });
+  }
+  if (selection.selection_type === 'activity') {
+    buttons.push({ operation: 'move_activity', label: 'Standort verschieben' });
+    buttons.push({ operation: 'replace_activity', label: 'Aktivität ersetzen' });
+    buttons.push({ operation: 'apply_route_preferences', label: 'Umgebung neu routen' });
+  }
+  if (!buttons.length) return null;
+  return (
+    <div className="mb-3 flex flex-wrap gap-2">
+      {buttons.map((button) => {
+        const active = pendingOperation?.operation === button.operation;
+        return (
+          <button
+            key={button.operation}
+            type="button"
+            onClick={() => onChooseOperation({ operation: button.operation, scope: selection.selection_type })}
+            className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${active ? 'border-slate-800 bg-slate-800 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'}`}
+          >
+            {button.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SelectionBanner({ selection, dragOverride, pendingOperation, onClear }) {
   if (!selection && !dragOverride) return null;
   return (
     <div className="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
@@ -168,6 +234,11 @@ function SelectionBanner({ selection, dragOverride, onClear }) {
             <div>
               <span className="font-bold text-slate-800">Karten-Override:</span>{' '}
               {dragOverride.target_label} → {dragOverride.coords[0].toFixed(5)}, {dragOverride.coords[1].toFixed(5)}
+            </div>
+          )}
+          {pendingOperation && (
+            <div>
+              <span className="font-bold text-slate-800">Aktion:</span> {pendingOperation.operation}
             </div>
           )}
           <div className="text-slate-500">
@@ -211,6 +282,7 @@ function TripCard({
   messageId,
   dayIndex,
   stepIndex,
+  onQuickAction,
 }) {
   if (!data?.legs) return null;
   return (
@@ -227,6 +299,9 @@ function TripCard({
         </div>
         <div className="bg-slate-200 text-slate-700 px-2 py-1 rounded-lg text-xs font-bold">Fokus</div>
       </button>
+      <div className="px-4 pt-3 flex gap-2">
+        <button type="button" onClick={() => onQuickAction?.({ operation: 'regenerate_trip', scope: 'trip' })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:border-slate-300">Neu berechnen</button>
+      </div>
       <div className="p-4 relative">
         {data.legs.map((leg, index) => {
           const Icon = modeIcon(leg.mode);
@@ -251,6 +326,9 @@ function TripCard({
                 </div>
               </div>
               <div className="flex-1 pt-1">
+                <div className="mb-2 flex justify-end">
+                  <span onClick={(event) => { event.stopPropagation(); onQuickAction?.({ operation: 'regenerate_leg', scope: 'leg', legIndex: index }); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-500">Leg neu</span>
+                </div>
                 <div className="font-bold text-sm text-slate-700">{leg.mode === 'WALK' ? 'Fußweg' : `${leg.mode} ${leg.line || ''}`}</div>
                 <div className="text-xs text-slate-500">{leg.from} <span className="text-slate-300">→</span> {leg.to}</div>
                 <div className="text-[11px] text-slate-400 mt-1">{leg.duration} Min.</div>
@@ -289,11 +367,12 @@ function ActivityList({ data, onSelectActivity, selectedActivityName, messageId 
   );
 }
 
-function ChatMessage({ msg, selection, onSelect }) {
+function ChatMessage({ msg, selection, onSelect, onChooseOperation }) {
   const isAi = msg.sender === 'ai';
   const [isSaved, setIsSaved] = useState(false);
   const parsed = msg.parsed;
-  const displayText = parsed ? parsed.intro || '' : msg.text;
+  const parsedError = parsed?.type === 'error' ? (parsed.message || parsed.error) : parsed?.error;
+  const displayText = parsedError ? parsedError : (parsed ? parsed.intro || '' : msg.text);
 
   const handleSaveTrip = async () => {
     const dataToSave = parsed;
@@ -336,7 +415,7 @@ function ChatMessage({ msg, selection, onSelect }) {
         </div>
         <div className="flex flex-col w-full">
           {(displayText || !parsed) && (
-            <div className={`p-3 rounded-2xl text-sm shadow-sm w-fit ${isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none'}`}>
+            <div className={`p-3 rounded-2xl text-sm shadow-sm w-fit ${parsedError ? 'bg-rose-50 border border-rose-200 text-rose-700' : (isAi ? 'bg-white border border-slate-100 text-slate-700 rounded-tl-none' : 'bg-slate-700 text-white rounded-tr-none')}`}>
               <p className="whitespace-pre-line">{displayText || msg.text}</p>
             </div>
           )}
@@ -349,6 +428,7 @@ function ChatMessage({ msg, selection, onSelect }) {
               isFocused={selection?.message_id === msg.id && selection?.selection_type === 'trip'}
               onFocusTrip={() => onSelect(buildSelectionPayload({ kind: 'trip', messageId: msg.id, planData: parsed }))}
               onFocusLeg={(leg, legIndex) => onSelect(buildSelectionPayload({ kind: 'leg', messageId: msg.id, planData: parsed, leg, legIndex }))}
+              onQuickAction={onChooseOperation}
             />
           )}
 
@@ -402,6 +482,7 @@ function ChatMessage({ msg, selection, onSelect }) {
                           isFocused={stepSelected}
                           onFocusTrip={() => onSelect(buildSelectionPayload({ kind: 'step', messageId: msg.id, planData: parsed, step, dayIndex, stepIndex: idx }))}
                           onFocusLeg={(leg, legIndex) => onSelect(buildSelectionPayload({ kind: 'leg', messageId: msg.id, planData: parsed, leg, dayIndex, stepIndex: idx, legIndex }))}
+                          onQuickAction={onChooseOperation}
                         />
                       )}
 
@@ -470,6 +551,14 @@ export default function App() {
   const [isMapReady, setIsMapReady] = useState(false);
   const [selection, setSelection] = useState(null);
   const [dragOverride, setDragOverride] = useState(null);
+  const [pendingOperation, setPendingOperation] = useState(null);
+  const [sessionId] = useState(() => {
+    const existing = window.localStorage.getItem('kira-session-id');
+    if (existing) return existing;
+    const created = window.crypto?.randomUUID?.() || `kira-${Date.now()}`;
+    window.localStorage.setItem('kira-session-id', created);
+    return created;
+  });
 
   const mapContainerRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -489,6 +578,7 @@ export default function App() {
     ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
     ws.onmessage = (event) => {
       setIsLoading(false);
+      setPendingOperation(null);
       setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: event.data }]);
     };
     ws.onerror = (e) => {
@@ -497,6 +587,7 @@ export default function App() {
     };
     ws.onclose = () => {
       setIsLoading(false);
+      setPendingOperation(null);
       setMessages((prev) => ([
         ...prev,
         {
@@ -603,6 +694,11 @@ export default function App() {
         ? window.L.circleMarker(marker.pos, { radius: 7, fillColor: '#6366f1', color: '#ffffff', weight: 2, fillOpacity: 1 })
         : window.L.circleMarker(marker.pos, { radius: 5, fillColor: '#2563eb', color: '#ffffff', weight: 2, fillOpacity: 1 });
       base.bindPopup(marker.label).addTo(routeLayerRef.current);
+      base.on('click', () => {
+        if (marker.kind === 'activity') {
+          setSelection(buildSelectionPayload({ kind: 'activity', messageId: latestRenderable?.message?.id, activity: marker.activity, dayIndex: marker.dayIndex, stepIndex: marker.stepIndex }));
+        }
+      });
     });
 
     const enableDragForSelection = selection?.selection_type === 'leg' || selection?.selection_type === 'activity';
@@ -661,6 +757,7 @@ export default function App() {
   const clearSelection = () => {
     setSelection(null);
     setDragOverride(null);
+    setPendingOperation(null);
   };
 
   const handleFileChange = (event) => {
@@ -690,10 +787,13 @@ export default function App() {
     setInput('');
     setIsLoading(true);
 
+    const effectiveOperation = pendingOperation || inferOperationFromSelection(selection, userText, dragOverride);
     const payload = {
       type: 'chat_request',
+      session_id: sessionId,
       text: userText,
       selection,
+      edit_operation: effectiveOperation,
       drag_override: dragOverride,
       current_trip: latestRenderable?.data || null,
     };
@@ -703,6 +803,7 @@ export default function App() {
     } else {
       setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: '⚠️ Keine Verbindung zum Server. Läuft das Backend?' }]);
       setIsLoading(false);
+      setPendingOperation(null);
     }
   };
 
@@ -722,19 +823,20 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-4">
           {parsedMessages.map((msg) => (
-            <ChatMessage key={msg.id} msg={msg} selection={selection} onSelect={(next) => { setSelection(next); setDragOverride(null); }} />
+            <ChatMessage key={msg.id} msg={msg} selection={selection} onSelect={(next) => { setSelection(next); setDragOverride(null); setPendingOperation(null); }} onChooseOperation={(operation) => setPendingOperation(operation)} />
           ))}
           {isLoading && <div className="text-slate-500 text-sm ml-4">KIRA denkt nach... <Loader2 className="inline animate-spin" /></div>}
           <div ref={messagesEndRef} />
         </div>
 
         <div className="p-4 bg-white border-t border-slate-100">
-          <SelectionBanner selection={selection} dragOverride={dragOverride} onClear={clearSelection} />
+          <SelectionBanner selection={selection} dragOverride={dragOverride} pendingOperation={pendingOperation} onClear={clearSelection} />
+          <SelectionActions selection={selection} pendingOperation={pendingOperation} onChooseOperation={setPendingOperation} />
           <form onSubmit={handleSend} className="flex items-center gap-2 mb-2">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={selection ? 'Änderung für das ausgewählte Element eingeben…' : 'Wohin möchtest du reisen?'}
+              placeholder={selection ? `Änderung für ${selection.label || selection.selection_type} eingeben…` : 'Wohin möchtest du reisen?'}
               className="flex-1 bg-slate-100 rounded-2xl py-3 pl-5 pr-4 focus:outline-none"
             />
             <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl">
@@ -770,6 +872,7 @@ export default function App() {
                   setActiveDay(day);
                   setSelection({ selection_type: 'day', day_index: day, label: `Tag ${day}`, message_id: latestRenderable?.message?.id });
                   setDragOverride(null);
+                  setPendingOperation({ operation: 'reroute_day', scope: 'day' });
                 }}
                 className={`px-4 py-2 rounded-xl text-sm font-bold transition-all shadow-sm ${activeDay === day ? 'bg-slate-800 text-white scale-105' : 'bg-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-700'}`}
               >
