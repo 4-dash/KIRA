@@ -2,21 +2,31 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
+  BedDouble,
   Bot,
   Bus,
+  Camera,
   Check,
   Clock,
+  Coffee,
+  Compass,
   Download,
+  FerrisWheel,
   Footprints,
+  Landmark,
   Loader2,
   MapPin,
   Menu,
+  Music4,
   Save,
   Send,
+  ShoppingBag,
   Star,
+  Trees,
   Train,
   Upload,
   User,
+  UtensilsCrossed,
   X,
 } from 'lucide-react';
 
@@ -97,6 +107,134 @@ function modeColor(mode) {
   if (mode === 'BUS') return 'bg-amber-100 text-amber-600 border-amber-200';
   return 'bg-emerald-100 text-emerald-600 border-emerald-200';
 }
+
+const ROUTE_COLORS = ['#2563eb', '#7c3aed', '#ea580c', '#0f766e', '#dc2626', '#0891b2'];
+
+function getLegRouteColor(leg, index = 0) {
+  if (leg?.mode === 'WALK') return '#16a34a';
+  if (leg?.mode === 'BUS') return '#f59e0b';
+  if (leg?.mode === 'RAIL') return '#2563eb';
+  return ROUTE_COLORS[index % ROUTE_COLORS.length];
+}
+
+function getCategoryMeta(place = {}) {
+  const haystack = [place.category, place.type, place.subcategory, place.tags, place.description, place.name]
+    .flat()
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+
+  if (/(restaurant|gasthof|essen|food|küche|cafe|café|bar|bistro)/.test(haystack)) {
+    return {
+      label: 'Gastronomie',
+      icon: UtensilsCrossed,
+      emoji: '🍽️',
+      chip: 'bg-amber-100 text-amber-700 border-amber-200',
+      markerBg: '#f59e0b',
+      markerBorder: '#fef3c7',
+    };
+  }
+  if (/(museum|galerie|ausstellung|kultur|theater|denkmal|histor)/.test(haystack)) {
+    return {
+      label: 'Kultur',
+      icon: Landmark,
+      emoji: '🏛️',
+      chip: 'bg-violet-100 text-violet-700 border-violet-200',
+      markerBg: '#8b5cf6',
+      markerBorder: '#ede9fe',
+    };
+  }
+  if (/(hotel|unterkunft|hostel|pension|resort|camping|ferienwohnung)/.test(haystack)) {
+    return {
+      label: 'Unterkunft',
+      icon: BedDouble,
+      emoji: '🛏️',
+      chip: 'bg-sky-100 text-sky-700 border-sky-200',
+      markerBg: '#0ea5e9',
+      markerBorder: '#e0f2fe',
+    };
+  }
+  if (/(park|natur|wander|berg|see|outdoor|trail|landschaft)/.test(haystack)) {
+    return {
+      label: 'Natur',
+      icon: Trees,
+      emoji: '🌲',
+      chip: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+      markerBg: '#16a34a',
+      markerBorder: '#dcfce7',
+    };
+  }
+  if (/(shop|einkauf|retail|markt|store|boutique)/.test(haystack)) {
+    return {
+      label: 'Shopping',
+      icon: ShoppingBag,
+      emoji: '🛍️',
+      chip: 'bg-rose-100 text-rose-700 border-rose-200',
+      markerBg: '#f43f5e',
+      markerBorder: '#ffe4e6',
+    };
+  }
+  if (/(freizeit|erlebnis|spaß|attraction|event|zoo|aquarium|kino|konzert)/.test(haystack)) {
+    return {
+      label: 'Freizeit',
+      icon: FerrisWheel,
+      emoji: '🎡',
+      chip: 'bg-pink-100 text-pink-700 border-pink-200',
+      markerBg: '#ec4899',
+      markerBorder: '#fce7f3',
+    };
+  }
+  if (/(aussicht|view|foto|camera)/.test(haystack)) {
+    return {
+      label: 'Aussicht',
+      icon: Camera,
+      emoji: '📷',
+      chip: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+      markerBg: '#06b6d4',
+      markerBorder: '#cffafe',
+    };
+  }
+  if (/(musik|music|festival)/.test(haystack)) {
+    return {
+      label: 'Musik',
+      icon: Music4,
+      emoji: '🎵',
+      chip: 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200',
+      markerBg: '#d946ef',
+      markerBorder: '#fae8ff',
+    };
+  }
+  if (/(tour|tourismus|poi|highlight|sehenswert)/.test(haystack)) {
+    return {
+      label: 'Highlight',
+      icon: Compass,
+      emoji: '📍',
+      chip: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+      markerBg: '#6366f1',
+      markerBorder: '#e0e7ff',
+    };
+  }
+  return {
+    label: 'Ort',
+    icon: Star,
+    emoji: '⭐',
+    chip: 'bg-slate-100 text-slate-700 border-slate-200',
+    markerBg: '#64748b',
+    markerBorder: '#e2e8f0',
+  };
+}
+
+function createPoiMapIcon(L, place = {}) {
+  const meta = getCategoryMeta(place);
+  return L.divIcon({
+    className: 'kira-poi-marker',
+    html: `<div style="width:32px;height:32px;border-radius:9999px;background:${meta.markerBg};border:2px solid ${meta.markerBorder};display:flex;align-items:center;justify-content:center;box-shadow:0 6px 14px rgba(15,23,42,0.22);font-size:16px;line-height:1;">${meta.emoji}</div>`,
+    iconSize: [32, 32],
+    iconAnchor: [16, 16],
+    popupAnchor: [0, -14],
+  });
+}
+
 
 function buildSelectionPayload({ kind, messageId, planData, step, leg, dayIndex, stepIndex, legIndex, activity }) {
   if (!kind) return null;
@@ -281,17 +419,22 @@ function SelectionBanner({ selection, dragOverride, pendingOperation, onClear })
 }
 
 function SinglePlaceCard({ place, isSelected, onSelect }) {
+  const meta = getCategoryMeta(place);
+  const PlaceIcon = meta.icon;
   return (
     <button
       onClick={onSelect}
       className={`w-full text-left rounded-xl border p-4 shadow-sm transition ${isSelected ? 'border-slate-800 ring-2 ring-slate-200 bg-slate-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}
     >
       <div className="flex gap-4">
-        <div className="h-10 w-10 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center shrink-0">
-          <Star size={18} />
+        <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 border ${meta.chip}`}>
+          <PlaceIcon size={18} />
         </div>
-        <div>
-          <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+        <div className="min-w-0 flex-1">
+          <div className="mb-1 flex flex-wrap items-center gap-2">
+            <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${meta.chip}`}>{meta.label}</span>
+          </div>
           <p className="text-xs text-slate-600 line-clamp-2">{place.description}</p>
         </div>
       </div>
@@ -711,18 +854,19 @@ export default function App() {
 
     const routesToDraw = [];
     const markers = [];
-    const addRouteFromLeg = (leg, color = '#3b82f6') => {
+    const addRouteFromLeg = (leg, color) => {
       const rawGeo = leg.geometry || leg.legGeometry?.points;
       let points = [];
       if (typeof rawGeo === 'string') points = decodePolyline(rawGeo);
       else if (Array.isArray(rawGeo)) points = rawGeo;
-      if (points.length) routesToDraw.push({ points, color });
-      if (leg.from_coords) markers.push({ pos: leg.from_coords, label: leg.from, kind: 'leg-from', leg });
-      if (leg.to_coords) markers.push({ pos: leg.to_coords, label: leg.to, kind: 'leg-to', leg });
+      const resolvedColor = color || getLegRouteColor(leg, routesToDraw.length);
+      if (points.length) routesToDraw.push({ points, color: resolvedColor, mode: leg?.mode });
+      if (leg.from_coords) markers.push({ pos: leg.from_coords, label: leg.from, kind: 'leg-from', leg, color: resolvedColor });
+      if (leg.to_coords) markers.push({ pos: leg.to_coords, label: leg.to, kind: 'leg-to', leg, color: resolvedColor });
     };
 
     if (data.legs) {
-      data.legs.forEach((leg) => addRouteFromLeg(leg, leg.mode === 'WALK' ? '#16a34a' : '#3b82f6'));
+      data.legs.forEach((leg, index) => addRouteFromLeg(leg, getLegRouteColor(leg, index)));
     } else if (data.type === 'activity_list') {
       data.items.forEach((item) => {
         if (item.lat && item.lon) markers.push({ pos: [item.lat, item.lon], label: item.name, kind: 'activity', activity: item });
@@ -736,7 +880,7 @@ export default function App() {
         }
         if (currentDay !== activeDay) return;
         if (step.type === 'trip' && step.data?.legs) {
-          step.data.legs.forEach((leg) => addRouteFromLeg(leg, step.label?.toLowerCase().includes('heim') ? '#ef4444' : '#3b82f6'));
+          step.data.legs.forEach((leg, legIndex) => addRouteFromLeg(leg, getLegRouteColor(leg, legIndex)));
         }
         if (step.type === 'activity' && step.data?.lat && step.data?.lon) {
           markers.push({ pos: [step.data.lat, step.data.lon], label: step.data.name, kind: 'activity', activity: step.data, stepIndex: idx, dayIndex: currentDay });
@@ -745,13 +889,29 @@ export default function App() {
     }
 
     routesToDraw.forEach((route) => {
-      window.L.polyline(route.points, { color: route.color, weight: 5, opacity: 0.8 }).addTo(routeLayerRef.current);
+      window.L.polyline(route.points, {
+        color: route.color,
+        weight: route.mode === 'WALK' ? 4 : 6,
+        opacity: 0.9,
+        lineCap: 'round',
+        lineJoin: 'round',
+        dashArray: route.mode === 'WALK' ? '8 8' : undefined,
+      }).addTo(routeLayerRef.current);
     });
 
     markers.forEach((marker) => {
-      const base = marker.kind === 'activity'
-        ? window.L.circleMarker(marker.pos, { radius: 7, fillColor: '#6366f1', color: '#ffffff', weight: 2, fillOpacity: 1 })
-        : window.L.circleMarker(marker.pos, { radius: 5, fillColor: '#2563eb', color: '#ffffff', weight: 2, fillOpacity: 1 });
+      let base;
+      if (marker.kind === 'activity') {
+        base = window.L.marker(marker.pos, { icon: createPoiMapIcon(window.L, marker.activity || {}) });
+      } else {
+        base = window.L.circleMarker(marker.pos, {
+          radius: 6,
+          fillColor: marker.color || '#2563eb',
+          color: '#ffffff',
+          weight: 2,
+          fillOpacity: 1,
+        });
+      }
       base.bindPopup(marker.label).addTo(routeLayerRef.current);
       base.on('click', () => {
         if (marker.kind === 'activity') {
