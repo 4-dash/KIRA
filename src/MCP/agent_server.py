@@ -384,7 +384,7 @@ def plan_journey_logic(start: str, end: str, time_str: str = "tomorrow 07:30",
     else:
         end_lat, end_lon = get_coords(end)
 
-    if not start_lat or not end_lat:
+    if start_lat is None or end_lat is None or start_lon is None or end_lon is None:
         return json.dumps({"error": f"Koordinaten nicht gefunden für {start} oder {end}"})
 
     prefs = build_route_preferences(route_preferences)

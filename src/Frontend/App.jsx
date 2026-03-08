@@ -146,11 +146,38 @@ function buildSelectionPayload({ kind, messageId, planData, step, leg, dayIndex,
       step_index: stepIndex,
       label: activity?.name,
       name: activity?.name,
-      coords: activity?.lat && activity?.lon ? [activity.lat, activity.lon] : undefined,
+      coords: Number.isFinite(activity?.lat) && Number.isFinite(activity?.lon) ? [activity.lat, activity.lon] : undefined,
     };
   }
   return null;
 }
+
+function enrichSelectionWithPlanContext(selection, planData) {
+  if (!selection || !planData) return selection;
+  const enriched = { ...selection };
+
+  if (selection.selection_type === 'activity' && Number.isInteger(selection.step_index)) {
+    const activity = planData?.steps?.[selection.step_index]?.data;
+    if (activity) {
+      enriched.name = enriched.name || activity.name;
+      enriched.label = enriched.label || activity.name;
+      if (!Array.isArray(enriched.coords) && Number.isFinite(activity?.lat) && Number.isFinite(activity?.lon)) {
+        enriched.coords = [activity.lat, activity.lon];
+      }
+    }
+  }
+
+  if ((selection.selection_type === 'trip' || selection.selection_type === 'step' || selection.selection_type === 'leg') && Number.isInteger(selection.step_index)) {
+    const trip = planData?.steps?.[selection.step_index]?.data || planData;
+    const firstLeg = trip?.legs?.[0];
+    const lastLeg = trip?.legs?.[trip.legs.length - 1];
+    if (firstLeg?.from) enriched.from_name = enriched.from_name || firstLeg.from;
+    if (lastLeg?.to) enriched.to_name = enriched.to_name || lastLeg.to;
+  }
+
+  return enriched;
+}
+
 
 function inferOperationFromSelection(selection, userText = '', dragOverride = null) {
   if (!selection) return null;
@@ -488,7 +515,27 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation }) {
 
                       {step.type === 'activity' && (
                         <div className="mb-6">
-                          <div className="text-xs font-bold text-indigo-400 mb-1 uppercase tracking-wider">Aktivität</div>
+                          <div className="mb-2 flex items-center justify-between gap-2">
+                            <div className="text-xs font-bold text-indigo-400 uppercase tracking-wider">Aktivität</div>
+                            {activitySelected && (
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => onChooseOperation?.({ operation: 'replace_activity', scope: 'activity' })}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:border-slate-300"
+                                >
+                                  Ersetzen
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onChooseOperation?.({ operation: 'move_activity', scope: 'activity' })}
+                                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:border-slate-300"
+                                >
+                                  Auf Karte verschieben
+                                </button>
+                              </div>
+                            )}
+                          </div>
                           <SinglePlaceCard
                             place={step.data}
                             isSelected={activitySelected}
@@ -579,6 +626,18 @@ export default function App() {
     ws.onmessage = (event) => {
       setIsLoading(false);
       setPendingOperation(null);
+      setDragOverride(null);
+      try {
+        const parsed = safeJsonParse(event.data);
+        if (parsed?.selection) {
+          setSelection(parsed.selection);
+          if (typeof parsed.selection?.day_index === 'number') {
+            setActiveDay(parsed.selection.day_index);
+          }
+        }
+      } catch {
+        // noop
+      }
       setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: event.data }]);
     };
     ws.onerror = (e) => {
@@ -787,12 +846,13 @@ export default function App() {
     setInput('');
     setIsLoading(true);
 
-    const effectiveOperation = pendingOperation || inferOperationFromSelection(selection, userText, dragOverride);
+    const enrichedSelection = enrichSelectionWithPlanContext(selection, latestRenderable?.data || null);
+    const effectiveOperation = pendingOperation || inferOperationFromSelection(enrichedSelection, userText, dragOverride);
     const payload = {
       type: 'chat_request',
       session_id: sessionId,
       text: userText,
-      selection,
+      selection: enrichedSelection,
       edit_operation: effectiveOperation,
       drag_override: dragOverride,
       current_trip: latestRenderable?.data || null,
