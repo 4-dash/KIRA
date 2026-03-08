@@ -579,25 +579,42 @@ export default function App() {
     ws.onmessage = (event) => {
       setIsLoading(false);
       setPendingOperation(null);
-      setMessages((prev) => [...prev, { id: crypto.randomUUID(), sender: 'ai', text: event.data }]);
+      
+      // Combines current time with a random number to ensure uniqueness
+      const uniqueId = `${Date.now()}-${Math.random()}`;
+      
+      setMessages((prev) => [...prev, { 
+        id: uniqueId, 
+        sender: 'ai', 
+        text: event.data 
+      }]);
     };
+
     ws.onerror = (e) => {
       console.error('❌ WebSocket Error:', e);
       setIsLoading(false);
     };
+
     ws.onclose = () => {
       setIsLoading(false);
       setPendingOperation(null);
+      
+      // Unique ID for the error message as well
+      const errorId = `${Date.now()}-${Math.random()}`;
+      
       setMessages((prev) => ([
         ...prev,
         {
-          id: crypto.randomUUID(),
+          id: errorId,
           sender: 'ai',
           text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
         },
       ]));
     };
+
     setSocket(ws);
+    
+    // Cleanup: closes the connection when the component unmounts
     return () => ws.close();
   }, []);
 
