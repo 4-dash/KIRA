@@ -4,7 +4,7 @@ services:
     image: opentripplanner/opentripplanner:2.8.1
     working_dir: /var/opentripplanner
     environment:
-      JAVA_TOOL_OPTIONS: "-Xmx20g"
+      JAVA_TOOL_OPTIONS: "-Xmx10g"
     volumes:
       - ./otp-data:/var/opentripplanner
     command: ["--load", "--serve"]

@@ -581,7 +581,7 @@ export default function App() {
     ws.onmessage = (event) => {
       setIsLoading(false);
       setPendingOperation(null);
-      setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: event.data }]);
+      setMessages((prev) => [...prev, { id: crypto.randomUUID(), sender: 'ai', text: event.data }]);
     };
     ws.onerror = (e) => {
       console.error('❌ WebSocket Error:', e);
@@ -593,7 +593,7 @@ export default function App() {
       setMessages((prev) => ([
         ...prev,
         {
-          id: Date.now(),
+          id: crypto.randomUUID(),
           sender: 'ai',
           text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
         },
