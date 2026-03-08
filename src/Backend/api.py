@@ -4,7 +4,7 @@ import os
 import re
 import sys
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -291,22 +291,147 @@ def parse_distance(text: str, keyword_group: str) -> Optional[float]:
     return value * 1000 if unit == "km" else value
 
 
+def _route_mode_patterns() -> Dict[str, List[str]]:
+    return {
+        "TRANSIT": [
+            r"öffis",
+            r"oeffis",
+            r"öffentliche(?:n|r)?\s+verkehrsmittel(?:n)?",
+            r"oeffentliche(?:n|r)?\s+verkehrsmittel(?:n)?",
+            r"öpnv",
+            r"oepnv",
+            r"nahverkehr",
+            r"bus(?:\s+und\s+bahn)?",
+            r"bahn",
+            r"zug",
+            r"transit",
+            r"öffi",
+            r"oeffi",
+        ],
+        "CAR": [
+            r"auto",
+            r"pkw",
+            r"wagen",
+            r"car",
+            r"mietwagen",
+        ],
+        "BICYCLE": [
+            r"fahrrad",
+            r"rad(?:l)?",
+            r"bike",
+            r"bicycle",
+        ],
+        "WALK": [
+            r"zu\s+fuß",
+            r"zu\s+fuss",
+            r"fußweg",
+            r"fussweg",
+            r"zu\s+gehen",
+            r"laufen",
+            r"gehen",
+            r"walk",
+            r"walking",
+        ],
+    }
+
+
+MODE_PATTERNS = _route_mode_patterns()
+
+
+def _match_mode_in_fragment(fragment: str) -> Optional[str]:
+    fragment = fragment or ""
+    for mode, patterns in MODE_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, fragment, re.IGNORECASE):
+                return mode
+    return None
+
+
+def _extract_forbidden_modes(lower: str) -> List[str]:
+    negation_templates = [
+        r"nicht\s+(?:mit\s+dem\s+|mit\s+der\s+|mit\s+)?(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"ohne\s+(?:den\s+|dem\s+|die\s+|das\s+)?(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"kein(?:e|en|em|er)?\s+(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"(?:vermeide|vermeiden|avoid)\s+(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"(?:statt|anstatt|instead\s+of)\s+(?P<fragment>.{0,40}?)(?:\s+(?:mit|per|via|zu\s+fuß|zu\s+fuss|walk|laufen|gehen)|$)",
+    ]
+
+    forbidden: List[Tuple[int, str]] = []
+    for pattern in negation_templates:
+        for match in re.finditer(pattern, lower, re.IGNORECASE):
+            fragment = (match.groupdict().get("fragment") or "").strip()
+            mode = _match_mode_in_fragment(fragment)
+            if mode:
+                forbidden.append((match.start(), mode))
+
+    forbidden.sort()
+    deduped: List[str] = []
+    seen = set()
+    for _, mode in forbidden:
+        if mode not in seen:
+            deduped.append(mode)
+            seen.add(mode)
+    return deduped
+
+
+def _extract_target_mode(lower: str, forbidden_modes: Optional[List[str]] = None) -> Optional[str]:
+    forbidden = set(forbidden_modes or [])
+
+    explicit_target_patterns = [
+        r"sondern\s+(?:mit\s+|per\s+|via\s+)?(?P<target>.{0,60})$",
+        r"(?:aber|lieber)\s+(?:mit\s+|per\s+|via\s+)?(?P<target>.{0,60})$",
+        r"(?:statt|anstatt|instead\s+of)\s+.{0,60}?(?:mit\s+|per\s+|via\s+)?(?P<target>.{0,60})$",
+        r"(?:mit|per|via)\s+(?P<target>.{0,60}?)(?:statt|anstatt|instead\s+of)",
+        r"(?:nutze|verwende|benutze|route|plane|berechne|fahre).{0,30}(?:mit|per|via)\s+(?P<target>.{0,60})$",
+    ]
+
+    for pattern in explicit_target_patterns:
+        match = re.search(pattern, lower, re.IGNORECASE)
+        if not match:
+            continue
+        mode = _match_mode_in_fragment(match.group('target'))
+        if mode and mode not in forbidden:
+            return mode
+
+    mentions: List[Tuple[int, str]] = []
+    for mode, patterns in MODE_PATTERNS.items():
+        if mode in forbidden:
+            continue
+        for pattern in patterns:
+            found = re.search(pattern, lower, re.IGNORECASE)
+            if found:
+                mentions.append((found.start(), mode))
+                break
+    if not mentions:
+        return None
+    mentions.sort()
+    return mentions[0][1]
+
 def extract_route_preferences_from_text(text: str, base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     lower = (text or "").lower()
     prefs: Dict[str, Any] = dict(base or {})
 
-    if any(word in lower for word in ["auto", "car", "mit dem auto", "fahren"]):
+    forbidden_modes = _extract_forbidden_modes(lower)
+    if forbidden_modes:
+        prefs["forbidden_modes"] = forbidden_modes
+
+    target_mode = _extract_target_mode(lower, forbidden_modes)
+    if target_mode == "CAR":
         prefs["primary_mode"] = "CAR"
         prefs["allowed_modes"] = ["CAR"]
-    elif any(word in lower for word in ["fahrrad", "bike", "rad"]):
+    elif target_mode == "BICYCLE":
         prefs["primary_mode"] = "BICYCLE"
         prefs["allowed_modes"] = ["BICYCLE", "WALK"]
-    elif any(word in lower for word in ["zu fuß", "zu fuss", "walk", "laufen"]):
+    elif target_mode == "WALK":
         prefs["primary_mode"] = "WALK"
         prefs["allowed_modes"] = ["WALK"]
-    elif any(word in lower for word in ["öpnv", "oepnv", "transit", "bahn", "bus", "zug"]):
+    elif target_mode == "TRANSIT":
         prefs["primary_mode"] = "TRANSIT"
-        prefs.setdefault("allowed_modes", ["WALK", "TRANSIT"])
+        prefs["allowed_modes"] = ["WALK", "TRANSIT"]
+    elif forbidden_modes:
+        current_allowed = [str(m).upper() for m in (prefs.get("allowed_modes") or []) if m]
+        if current_allowed:
+            prefs["allowed_modes"] = [m for m in current_allowed if m not in set(forbidden_modes)]
 
     if any(word in lower for word in ["weniger umst", "wenig umst", "möglichst wenig umst", "avoid transfer", "direkt", "ohne umstieg", "ohne umsteigen"]):
         prefs["avoid_transfers"] = True
@@ -454,6 +579,29 @@ def apply_query_preferences(trip_obj: Dict[str, Any], route_preferences: Dict[st
     trip_obj["query_preferences"] = merged
 
 
+def _valid_coords(coords: Any) -> bool:
+    return (
+        isinstance(coords, (list, tuple))
+        and len(coords) >= 2
+        and coords[0] is not None
+        and coords[1] is not None
+    )
+
+
+def _trip_terminal_coords(trip_obj: Dict[str, Any]) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    legs = trip_obj.get("legs", []) or []
+    start_coords = None
+    end_coords = None
+    if legs:
+        first_leg = legs[0] or {}
+        last_leg = legs[-1] or {}
+        if _valid_coords(first_leg.get("from_coords")):
+            start_coords = tuple(first_leg.get("from_coords")[:2])
+        if _valid_coords(last_leg.get("to_coords")):
+            end_coords = tuple(last_leg.get("to_coords")[:2])
+    return start_coords, end_coords
+
+
 def reroute_trip_object(
     trip_obj: Dict[str, Any],
     route_preferences: Dict[str, Any],
@@ -461,16 +609,18 @@ def reroute_trip_object(
     start_override: Optional[Tuple[float, float]] = None,
     end_override: Optional[Tuple[float, float]] = None,
     selection: Optional[Dict[str, Any]] = None,
+    time_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     start_name = trip_obj.get("start") or trip_obj.get("legs", [{}])[0].get("from")
     end_name = trip_obj.get("end") or trip_obj.get("legs", [{}])[-1].get("to")
+    fallback_start_coords, fallback_end_coords = _trip_terminal_coords(trip_obj)
     result = parse_json_result(
         plan_journey_logic(
             start=start_name,
             end=end_name,
-            time_str=trip_start_time_string(trip_obj),
-            start_coords_override=start_override,
-            end_coords_override=end_override,
+            time_str=time_override or trip_start_time_string(trip_obj),
+            start_coords_override=start_override or fallback_start_coords,
+            end_coords_override=end_override or fallback_end_coords,
             route_preferences=route_preferences,
             selection=selection,
         )
@@ -523,6 +673,53 @@ def get_day_step_indices(current_trip: Dict[str, Any], day_index: int):
     return collected
 
 
+def extract_trip_start_time(trip_obj: Dict[str, Any], fallback: str = "07:30") -> str:
+    first_leg = (trip_obj or {}).get("legs", [{}])[0]
+    return first_leg.get("start_time") or fallback
+
+
+def extract_trip_end_time(trip_obj: Dict[str, Any]) -> Optional[str]:
+    legs = (trip_obj or {}).get("legs", [])
+    if not legs:
+        return None
+    return legs[-1].get("end_time")
+
+
+def estimate_activity_duration_minutes(activity: Dict[str, Any]) -> int:
+    if not isinstance(activity, dict):
+        return 90
+    explicit = activity.get("duration") or activity.get("duration_minutes")
+    try:
+        if explicit is not None:
+            return max(5, int(explicit))
+    except Exception:
+        pass
+    if activity.get("geometry"):
+        return 120
+    category = str(activity.get("category") or "").lower()
+    if any(word in category for word in ["hotel", "unterkunft"]):
+        return 30
+    if any(word in category for word in ["restaurant", "gasthof", "essen"]):
+        return 90
+    return 90
+
+
+def shift_clock_time(clock_time: Optional[str], delta_minutes: int) -> Optional[str]:
+    if not clock_time:
+        return None
+    try:
+        hours, minutes = map(int, str(clock_time).split(":"))
+        total = hours * 60 + minutes + int(delta_minutes)
+        total %= 24 * 60
+        return f"{total // 60:02d}:{total % 60:02d}"
+    except Exception:
+        return None
+
+
+def build_tomorrow_time_str(clock_time: Optional[str], fallback: str = "07:30") -> str:
+    return f"tomorrow {clock_time or fallback}"
+
+
 def replace_leg_in_trip(
     trip_obj: Dict[str, Any],
     leg_index: int,
@@ -546,8 +743,8 @@ def replace_leg_in_trip(
             start=leg.get("from") or selection.get("from_name") or trip_obj.get("start"),
             end=leg.get("to") or selection.get("to_name") or trip_obj.get("end"),
             time_str=f"tomorrow {leg.get('start_time', '07:30')}",
-            start_coords_override=start_override,
-            end_coords_override=end_override,
+            start_coords_override=start_override or (tuple(leg.get("from_coords")[:2]) if _valid_coords(leg.get("from_coords")) else None),
+            end_coords_override=end_override or (tuple(leg.get("to_coords")[:2]) if _valid_coords(leg.get("to_coords")) else None),
             route_preferences=route_preferences,
             selection=selection,
         )
@@ -566,6 +763,16 @@ def replace_leg_in_trip(
     return updated_trip
 
 
+def _resolve_activity_coords(activity: Dict[str, Any], selection: Optional[Dict[str, Any]] = None) -> Optional[Tuple[float, float]]:
+    if activity.get("lat") is not None and activity.get("lon") is not None:
+        return (activity.get("lat"), activity.get("lon"))
+    if selection and _valid_coords(selection.get("coords")):
+        return tuple(selection.get("coords")[:2])
+    if selection and _valid_coords(selection.get("replacement_coords")):
+        return tuple(selection.get("replacement_coords")[:2])
+    return None
+
+
 def update_adjacent_trips_for_activity(
     plan_data: Dict[str, Any],
     step_index: int,
@@ -579,13 +786,21 @@ def update_adjacent_trips_for_activity(
     if step_index < 0 or step_index >= len(steps):
         return {"type": "error", "message": "Ausgewählte Aktivität nicht gefunden."}
 
-    activity = steps[step_index].get("data", {})
+    activity = copy.deepcopy((activity_step or {}).get("data") or steps[step_index].get("data", {}))
     if drag_override and drag_override.get("coords"):
         activity["lat"], activity["lon"] = drag_override["coords"]
         activity["moved_by_user"] = True
 
+    resolved_coords = _resolve_activity_coords(activity, selection)
+    if resolved_coords is None:
+        return {"type": "error", "message": "Für die Aktivität fehlen Koordinaten für das Rerouting."}
+    activity["lat"], activity["lon"] = resolved_coords
+
     prev_trip_idx = next((i for i in range(step_index - 1, -1, -1) if steps[i].get("type") == "trip"), None)
     next_trip_idx = next((i for i in range(step_index + 1, len(steps)) if steps[i].get("type") == "trip"), None)
+
+    rerouted_prev = None
+    rerouted_next = None
 
     if prev_trip_idx is not None:
         prev_trip = steps[prev_trip_idx].get("data", {})
@@ -600,17 +815,30 @@ def update_adjacent_trips_for_activity(
 
     if next_trip_idx is not None:
         next_trip = steps[next_trip_idx].get("data", {})
+        next_time_override = None
+        if isinstance(rerouted_prev, dict) and rerouted_prev.get("legs"):
+            arrival_time = extract_trip_end_time(rerouted_prev)
+            next_departure = shift_clock_time(arrival_time, estimate_activity_duration_minutes(activity))
+            next_time_override = build_tomorrow_time_str(next_departure, extract_trip_start_time(next_trip))
         rerouted_next = reroute_trip_object(
             next_trip,
             route_preferences,
             start_override=(activity["lat"], activity["lon"]),
             selection=selection,
+            time_override=next_time_override,
         )
         if "legs" in rerouted_next:
             steps[next_trip_idx]["data"] = rerouted_next
 
+    refreshed_selection = dict(selection or {})
+    if refreshed_selection.get("selection_type") == "activity":
+        refreshed_selection["name"] = activity.get("name")
+        refreshed_selection["label"] = activity.get("name")
+        refreshed_selection["coords"] = [activity.get("lat"), activity.get("lon")]
+        refreshed_selection["step_index"] = step_index
+
     steps[step_index]["data"] = activity
-    updated["selection"] = selection
+    updated["selection"] = refreshed_selection or selection
     updated["query_preferences"] = dict(updated.get("query_preferences") or {}) | route_preferences
     return updated
 
@@ -644,8 +872,26 @@ def replace_activity_in_plan(
     if not replacement:
         return {"type": "error", "message": "Keine passende Ersatzaktivität gefunden."}
 
+    if replacement.get("lat") is None or replacement.get("lon") is None:
+        return {"type": "error", "message": "Die Ersatzaktivität hat keine Koordinaten."}
+
     steps[step_index]["data"] = replacement
-    return update_adjacent_trips_for_activity(updated, step_index, steps[step_index], route_preferences, {"coords": [replacement["lat"], replacement["lon"]]}, selection)
+    replacement_selection = dict(selection or {})
+    replacement_selection.update({
+        "selection_type": "activity",
+        "name": replacement.get("name"),
+        "label": replacement.get("name"),
+        "coords": [replacement.get("lat"), replacement.get("lon")],
+        "step_index": step_index,
+    })
+    return update_adjacent_trips_for_activity(
+        updated,
+        step_index,
+        steps[step_index],
+        route_preferences,
+        {"coords": [replacement["lat"], replacement["lon"]]},
+        replacement_selection,
+    )
 
 
 def apply_deterministic_edit(payload: Dict[str, Any]) -> Optional[str]:
