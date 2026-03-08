@@ -571,25 +571,26 @@ export default function App() {
   const latestRenderable = useMemo(() => getLatestRenderablePlan(parsedMessages), [parsedMessages]);
 
   useEffect(() => {
+
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
     const host = window.location.hostname;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     // Logic: If we are on localhost, use 8000. If we are on the VM, use Nginx (port 80).
     const port = (host === 'localhost' || host === '127.0.0.1') ? ':8000' : '';
     const wsUrl = `${wsProtocol}//${host}${port}/chat`;
     const ws = new WebSocket(wsUrl);
+
     ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
+
     ws.onmessage = (event) => {
       setIsLoading(false);
       setPendingOperation(null);
-      
-      // Combines current time with a random number to ensure uniqueness
+
       const uniqueId = `${Date.now()}-${Math.random()}`;
-      
-      setMessages((prev) => [...prev, { 
-        id: uniqueId, 
-        sender: 'ai', 
-        text: event.data 
-      }]);
+      setMessages((prev) => [...prev, { id: uniqueId, sender: 'ai', text: event.data }]);
     };
 
     ws.onerror = (e) => {
@@ -597,29 +598,33 @@ export default function App() {
       setIsLoading(false);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       setIsLoading(false);
       setPendingOperation(null);
-      
-      // Unique ID for the error message as well
-      const errorId = `${Date.now()}-${Math.random()}`;
-      
-      setMessages((prev) => ([
-        ...prev,
-        {
-          id: errorId,
-          sender: 'ai',
-          text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
-        },
-      ]));
+      // 3. Only show error message if it wasn't a deliberate close
+      if (e.code !== 1000) {
+        const errorId = `${Date.now()}-${Math.random()}`;
+        setMessages((prev) => ([
+          ...prev,
+          {
+            id: errorId,
+            sender: 'ai',
+            text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
+          },
+        ]));
+      }
     };
 
     setSocket(ws);
-    
-    // Cleanup: closes the connection when the component unmounts
-    return () => ws.close();
-  }, []);
 
+    // 4. Cleanup: Close connection when component unmounts
+    return () => {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(1000); 
+      }
+    };
+  }, []); // Empty array keeps the effect from re-running constantly
+  
   useEffect(() => {
     if (!document.getElementById('leaflet-css')) {
       const link = document.createElement('link');
