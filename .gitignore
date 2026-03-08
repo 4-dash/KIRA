@@ -128,3 +128,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+src/otp-data/graph.obj
+src/otp-data/gtfs.zip
+src/otp-data/schwaben-latest.osm.pbf
