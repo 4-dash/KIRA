@@ -255,6 +255,8 @@ def build_route_preferences(route_preferences=None):
     primary_mode = str(prefs.get('primary_mode') or '').upper()
     allowed_modes = prefs.get('allowed_modes') or []
     allowed_modes = [str(m).upper() for m in allowed_modes if m]
+    forbidden_modes = [str(m).upper() for m in (prefs.get('forbidden_modes') or []) if m]
+    forbidden_set = set(forbidden_modes)
 
     if not allowed_modes:
         if primary_mode == 'CAR':
@@ -266,7 +268,9 @@ def build_route_preferences(route_preferences=None):
         else:
             allowed_modes = ['WALK', 'TRANSIT']
 
-    if primary_mode and primary_mode not in allowed_modes:
+    allowed_modes = [m for m in allowed_modes if m not in forbidden_set]
+
+    if primary_mode and primary_mode not in forbidden_set and primary_mode not in allowed_modes:
         allowed_modes.insert(0, primary_mode)
 
     seen = set()
@@ -276,6 +280,7 @@ def build_route_preferences(route_preferences=None):
     compiled = {
         'primary_mode': primary_mode or None,
         'allowed_modes': allowed_modes,
+        'forbidden_modes': forbidden_modes,
         'transport_modes_literal': transport_modes_literal,
         'arrive_by': bool(prefs.get('arrive_by', False)),
         'wheelchair': bool(prefs.get('wheelchair_accessible', prefs.get('wheelchair', False))),

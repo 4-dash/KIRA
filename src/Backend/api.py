@@ -4,7 +4,7 @@ import os
 import re
 import sys
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -291,22 +291,147 @@ def parse_distance(text: str, keyword_group: str) -> Optional[float]:
     return value * 1000 if unit == "km" else value
 
 
+def _route_mode_patterns() -> Dict[str, List[str]]:
+    return {
+        "TRANSIT": [
+            r"öffis",
+            r"oeffis",
+            r"öffentliche(?:n|r)?\s+verkehrsmittel(?:n)?",
+            r"oeffentliche(?:n|r)?\s+verkehrsmittel(?:n)?",
+            r"öpnv",
+            r"oepnv",
+            r"nahverkehr",
+            r"bus(?:\s+und\s+bahn)?",
+            r"bahn",
+            r"zug",
+            r"transit",
+            r"öffi",
+            r"oeffi",
+        ],
+        "CAR": [
+            r"auto",
+            r"pkw",
+            r"wagen",
+            r"car",
+            r"mietwagen",
+        ],
+        "BICYCLE": [
+            r"fahrrad",
+            r"rad(?:l)?",
+            r"bike",
+            r"bicycle",
+        ],
+        "WALK": [
+            r"zu\s+fuß",
+            r"zu\s+fuss",
+            r"fußweg",
+            r"fussweg",
+            r"zu\s+gehen",
+            r"laufen",
+            r"gehen",
+            r"walk",
+            r"walking",
+        ],
+    }
+
+
+MODE_PATTERNS = _route_mode_patterns()
+
+
+def _match_mode_in_fragment(fragment: str) -> Optional[str]:
+    fragment = fragment or ""
+    for mode, patterns in MODE_PATTERNS.items():
+        for pattern in patterns:
+            if re.search(pattern, fragment, re.IGNORECASE):
+                return mode
+    return None
+
+
+def _extract_forbidden_modes(lower: str) -> List[str]:
+    negation_templates = [
+        r"nicht\s+(?:mit\s+dem\s+|mit\s+der\s+|mit\s+)?(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"ohne\s+(?:den\s+|dem\s+|die\s+|das\s+)?(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"kein(?:e|en|em|er)?\s+(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"(?:vermeide|vermeiden|avoid)\s+(?P<fragment>.{0,40}?)(?:\s+(?:sondern|aber|,|\.|$))",
+        r"(?:statt|anstatt|instead\s+of)\s+(?P<fragment>.{0,40}?)(?:\s+(?:mit|per|via|zu\s+fuß|zu\s+fuss|walk|laufen|gehen)|$)",
+    ]
+
+    forbidden: List[Tuple[int, str]] = []
+    for pattern in negation_templates:
+        for match in re.finditer(pattern, lower, re.IGNORECASE):
+            fragment = (match.groupdict().get("fragment") or "").strip()
+            mode = _match_mode_in_fragment(fragment)
+            if mode:
+                forbidden.append((match.start(), mode))
+
+    forbidden.sort()
+    deduped: List[str] = []
+    seen = set()
+    for _, mode in forbidden:
+        if mode not in seen:
+            deduped.append(mode)
+            seen.add(mode)
+    return deduped
+
+
+def _extract_target_mode(lower: str, forbidden_modes: Optional[List[str]] = None) -> Optional[str]:
+    forbidden = set(forbidden_modes or [])
+
+    explicit_target_patterns = [
+        r"sondern\s+(?:mit\s+|per\s+|via\s+)?(?P<target>.{0,60})$",
+        r"(?:aber|lieber)\s+(?:mit\s+|per\s+|via\s+)?(?P<target>.{0,60})$",
+        r"(?:statt|anstatt|instead\s+of)\s+.{0,60}?(?:mit\s+|per\s+|via\s+)?(?P<target>.{0,60})$",
+        r"(?:mit|per|via)\s+(?P<target>.{0,60}?)(?:statt|anstatt|instead\s+of)",
+        r"(?:nutze|verwende|benutze|route|plane|berechne|fahre).{0,30}(?:mit|per|via)\s+(?P<target>.{0,60})$",
+    ]
+
+    for pattern in explicit_target_patterns:
+        match = re.search(pattern, lower, re.IGNORECASE)
+        if not match:
+            continue
+        mode = _match_mode_in_fragment(match.group('target'))
+        if mode and mode not in forbidden:
+            return mode
+
+    mentions: List[Tuple[int, str]] = []
+    for mode, patterns in MODE_PATTERNS.items():
+        if mode in forbidden:
+            continue
+        for pattern in patterns:
+            found = re.search(pattern, lower, re.IGNORECASE)
+            if found:
+                mentions.append((found.start(), mode))
+                break
+    if not mentions:
+        return None
+    mentions.sort()
+    return mentions[0][1]
+
 def extract_route_preferences_from_text(text: str, base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     lower = (text or "").lower()
     prefs: Dict[str, Any] = dict(base or {})
 
-    if any(word in lower for word in ["auto", "car", "mit dem auto", "fahren"]):
+    forbidden_modes = _extract_forbidden_modes(lower)
+    if forbidden_modes:
+        prefs["forbidden_modes"] = forbidden_modes
+
+    target_mode = _extract_target_mode(lower, forbidden_modes)
+    if target_mode == "CAR":
         prefs["primary_mode"] = "CAR"
         prefs["allowed_modes"] = ["CAR"]
-    elif any(word in lower for word in ["fahrrad", "bike", "rad"]):
+    elif target_mode == "BICYCLE":
         prefs["primary_mode"] = "BICYCLE"
         prefs["allowed_modes"] = ["BICYCLE", "WALK"]
-    elif any(word in lower for word in ["zu fuß", "zu fuss", "walk", "laufen"]):
+    elif target_mode == "WALK":
         prefs["primary_mode"] = "WALK"
         prefs["allowed_modes"] = ["WALK"]
-    elif any(word in lower for word in ["öpnv", "oepnv", "transit", "bahn", "bus", "zug"]):
+    elif target_mode == "TRANSIT":
         prefs["primary_mode"] = "TRANSIT"
-        prefs.setdefault("allowed_modes", ["WALK", "TRANSIT"])
+        prefs["allowed_modes"] = ["WALK", "TRANSIT"]
+    elif forbidden_modes:
+        current_allowed = [str(m).upper() for m in (prefs.get("allowed_modes") or []) if m]
+        if current_allowed:
+            prefs["allowed_modes"] = [m for m in current_allowed if m not in set(forbidden_modes)]
 
     if any(word in lower for word in ["weniger umst", "wenig umst", "möglichst wenig umst", "avoid transfer", "direkt", "ohne umstieg", "ohne umsteigen"]):
         prefs["avoid_transfers"] = True
