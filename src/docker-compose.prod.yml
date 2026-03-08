@@ -1,0 +1,27 @@
+
+services:
+  nginx:
+    image: nginx:latest
+    container_name: nginx_gateway
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    networks:
+      - nginx_proxy
+    restart: always
+
+  frontend:
+    networks:
+      - default
+      - nginx_proxy
+
+networks:
+  nginx_proxy:
+    external: true
+
+volumes:
+  opensearch-data:
+    external: true
+    name: kira-project_os_data
+  bc-data:

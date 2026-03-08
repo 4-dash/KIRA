@@ -573,7 +573,9 @@ export default function App() {
   useEffect(() => {
     const host = window.location.hostname;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${host}:8000/chat`;
+    // Logic: If we are on localhost, use 8000. If we are on the VM, use Nginx (port 80).
+    const port = (host === 'localhost' || host === '127.0.0.1') ? ':8000' : '';
+    const wsUrl = `${wsProtocol}//${host}${port}/chat`;
     const ws = new WebSocket(wsUrl);
     ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
     ws.onmessage = (event) => {

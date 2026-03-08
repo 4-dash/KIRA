@@ -1,0 +1,22 @@
+
+services:
+  otp:
+    ports:
+      - "8080:8080"
+  opensearch:
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+  opensearch-dashboards:
+    ports:
+      - "5601:5601"
+  backend:
+    ports:
+      - "8000:8000"
+  frontend:
+    ports:
+      - "5173:5173"
+
+volumes:
+  opensearch-data:
+  bc-data:

@@ -1,11 +1,8 @@
-version: "3.9"
 
 services:
   otp:
     image: opentripplanner/opentripplanner:2.8.1
     working_dir: /var/opentripplanner
-    ports:
-      - "8080:8080"
     environment:
       JAVA_TOOL_OPTIONS: "-Xmx20g"
     volumes:
@@ -31,9 +28,6 @@ services:
         hard: 65536
     volumes:
       - opensearch-data:/usr/share/opensearch/data
-    ports:
-      - "9200:9200"
-      - "9600:9600"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
@@ -49,8 +43,6 @@ services:
     environment:
       - 'OPENSEARCH_HOSTS=["http://opensearch:9200"]'
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
-    ports:
-      - 5601:5601
     depends_on:
       - opensearch
 
@@ -69,8 +61,6 @@ services:
         condition: service_started
       opensearch:
         condition: service_healthy
-    ports:
-      - "8000:8000"
     restart: unless-stopped
 
   frontend:
@@ -79,13 +69,11 @@ services:
         dockerfile: Dockerfile
     depends_on:
         - backend
-    ports:
-        - "5173:5173"
     restart: unless-stopped
 
   # Ingestion toolbox container (does NOT auto-run ingestor_v2).
   # Use:
-  #   docker compose --profile ingest run --rm ingester python ingestor_v2.py
+  #   docker-compose --profile ingest run --rm ingester python ingestor_v2.py
   ingester:
     profiles: ["ingest"]
     build:
@@ -107,7 +95,7 @@ services:
 
   # BayernCloud fetcher (optional): downloads BayernCloud JSON into the shared bc-data volume.
   # Use:
-  #   docker compose --profile ingest run --rm bayerncloud-fetch
+  #   docker-compose --profile ingest run --rm bayerncloud-fetch
   bayerncloud-fetch:
     profiles: ["ingest"]
     build:
@@ -122,8 +110,3 @@ services:
     command: ["python", "bayerncloud_fetch.py"]
     restart: "no"
 
-volumes:
-  opensearch-data:
-    external: true
-    name: kira-project_os_data
-  bc-data:
