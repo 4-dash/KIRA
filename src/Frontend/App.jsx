@@ -761,11 +761,18 @@ export default function App() {
   const latestRenderable = useMemo(() => getLatestRenderablePlan(parsedMessages), [parsedMessages]);
 
   useEffect(() => {
+
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
     const host = window.location.hostname;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${host}:8000/chat`;
     const ws = new WebSocket(wsUrl);
+
     ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
+
     ws.onmessage = (event) => {
       setIsLoading(false);
       setPendingOperation(null);
@@ -781,28 +788,43 @@ export default function App() {
       } catch {
         // noop
       }
-      setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: event.data }]);
+      
+      const uniqueId = `${Date.now()}-${Math.random()}`;
+      setMessages((prev) => [...prev, { id: uniqueId, sender: 'ai', text: event.data }]);
     };
+
     ws.onerror = (e) => {
       console.error('❌ WebSocket Error:', e);
       setIsLoading(false);
     };
-    ws.onclose = () => {
+
+    ws.onclose = (e) => {
       setIsLoading(false);
       setPendingOperation(null);
-      setMessages((prev) => ([
-        ...prev,
-        {
-          id: Date.now(),
-          sender: 'ai',
-          text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
-        },
-      ]));
+      // 3. Only show error message if it wasn't a deliberate close
+      if (e.code !== 1000) {
+        const errorId = `${Date.now()}-${Math.random()}`;
+        setMessages((prev) => ([
+          ...prev,
+          {
+            id: errorId,
+            sender: 'ai',
+            text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
+          },
+        ]));
+      }
     };
-    setSocket(ws);
-    return () => ws.close();
-  }, []);
 
+    setSocket(ws);
+
+    // 4. Cleanup: Close connection when component unmounts
+    return () => {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(1000); 
+      }
+    };
+  }, []); // Empty array keeps the effect from re-running constantly
+  
   useEffect(() => {
     if (!document.getElementById('leaflet-css')) {
       const link = document.createElement('link');
