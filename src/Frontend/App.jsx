@@ -545,6 +545,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([INITIAL_MESSAGE]);
   const [isLoading, setIsLoading] = useState(false);
+  const socketRef = useRef(null);
   const [socket, setSocket] = useState(null);
   const [showMobileChat, setShowMobileChat] = useState(true);
   const [activeDay, setActiveDay] = useState(1);
@@ -572,7 +573,7 @@ export default function App() {
 
   useEffect(() => {
 
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
@@ -580,6 +581,7 @@ export default function App() {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProtocol}//${host}:8000/chat`;
     const ws = new WebSocket(wsUrl);
+    socketRef.current = ws;
 
     ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
 
