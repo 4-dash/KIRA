@@ -770,8 +770,14 @@ useEffect(() => {
 
   const host = window.location.hostname;
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${host}:8000/chat`;
+
+  // DEV vs PROD
+  const isDev = import.meta.env.VITE_RUNNING_COMP === 'DEV';
+  const port = isDev ? ':8000' : '';
+
+  const wsUrl = `${wsProtocol}//${host}${port}/chat`;
   const ws = new WebSocket(wsUrl);
+
   socketRef.current = ws;
 
   ws.onopen = () => {
@@ -784,6 +790,7 @@ useEffect(() => {
     setIsLoading(false);
     setPendingOperation(null);
     setDragOverride(null);
+
     try {
       const parsed = safeJsonParse(event.data);
       if (parsed?.selection) {
@@ -797,7 +804,10 @@ useEffect(() => {
     }
 
     const uniqueId = `${Date.now()}-${Math.random()}`;
-    setMessages((prev) => [...prev, { id: uniqueId, sender: 'ai', text: event.data }]);
+    setMessages((prev) => [
+      ...prev,
+      { id: uniqueId, sender: 'ai', text: event.data }
+    ]);
   };
 
   ws.onerror = (e) => {
@@ -823,7 +833,10 @@ useEffect(() => {
       {
         id: errorId,
         sender: 'ai',
-        text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
+        text: JSON.stringify({
+          type: 'error',
+          message: 'Verbindung zum Backend verloren.'
+        }),
       },
     ]));
   };
@@ -832,10 +845,12 @@ useEffect(() => {
 
   return () => {
     isCleanup = true;
+
     if (socketRef.current === ws) {
       socketRef.current = null;
       setSocket(null);
     }
+
     if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
       ws.close(1000, 'component cleanup');
     }
