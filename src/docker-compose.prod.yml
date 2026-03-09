@@ -12,6 +12,14 @@ services:
     restart: always
 
   frontend:
+    environment:
+      # tells which compse we are running to select the correct port
+      - VITE_RUNNING_COMP=PROD
+    networks:
+      - default
+      - nginx_proxy
+
+  backend:
     networks:
       - default
       - nginx_proxy

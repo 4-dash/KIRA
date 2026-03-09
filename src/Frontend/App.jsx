@@ -578,8 +578,10 @@ export default function App() {
 
     const host = window.location.hostname;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // Logic: If we are on localhost, use 8000. If we are on the VM, use Nginx (port 80).
-    const port = (host === 'localhost' || host === '127.0.0.1') ? ':8000' : '';
+    // Logic: add port 8000 if using docker-compose.dev.yml
+    const isDev = import.meta.env.VITE_RUNNING_COMP === 'DEV';
+    const port = isDev ? ':8000' : '';
+
     const wsUrl = `${wsProtocol}//${host}${port}/chat`;
     const ws = new WebSocket(wsUrl);
 
