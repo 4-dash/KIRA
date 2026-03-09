@@ -761,86 +761,71 @@ export default function App() {
   const parsedMessages = useMemo(() => getParsedMessages(messages), [messages]);
   const latestRenderable = useMemo(() => getLatestRenderablePlan(parsedMessages), [parsedMessages]);
 
-useEffect(() => {
-  let isCleanup = false;
+  useEffect(() => {
 
-  if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
-    return undefined;
-  }
+    if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
 
-  const host = window.location.hostname;
-  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${wsProtocol}//${host}:8000/chat`;
-  const ws = new WebSocket(wsUrl);
-  socketRef.current = ws;
+    const host = window.location.hostname;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${host}:8000/chat`;
+    const ws = new WebSocket(wsUrl);
+    socketRef.current = ws;
 
-  ws.onopen = () => {
-    console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
-  };
+    ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
 
-  ws.onmessage = (event) => {
-    if (socketRef.current !== ws) return;
-
-    setIsLoading(false);
-    setPendingOperation(null);
-    setDragOverride(null);
-    try {
-      const parsed = safeJsonParse(event.data);
-      if (parsed?.selection) {
-        setSelection(parsed.selection);
-        if (typeof parsed.selection?.day_index === 'number') {
-          setActiveDay(parsed.selection.day_index);
+    ws.onmessage = (event) => {
+      setIsLoading(false);
+      setPendingOperation(null);
+      setDragOverride(null);
+      try {
+        const parsed = safeJsonParse(event.data);
+        if (parsed?.selection) {
+          setSelection(parsed.selection);
+          if (typeof parsed.selection?.day_index === 'number') {
+            setActiveDay(parsed.selection.day_index);
+          }
         }
+      } catch {
+        // noop
       }
-    } catch {
-      // noop
-    }
+      
+      const uniqueId = `${Date.now()}-${Math.random()}`;
+      setMessages((prev) => [...prev, { id: uniqueId, sender: 'ai', text: event.data }]);
+    };
 
-    const uniqueId = `${Date.now()}-${Math.random()}`;
-    setMessages((prev) => [...prev, { id: uniqueId, sender: 'ai', text: event.data }]);
-  };
+    ws.onerror = (e) => {
+      console.error('❌ WebSocket Error:', e);
+      setIsLoading(false);
+    };
 
-  ws.onerror = (e) => {
-    if (socketRef.current !== ws) return;
-    console.error('❌ WebSocket Error:', e);
-    setIsLoading(false);
-  };
+    ws.onclose = (e) => {
+      setIsLoading(false);
+      setPendingOperation(null);
+      // 3. Only show error message if it wasn't a deliberate close
+      if (e.code !== 1000) {
+        const errorId = `${Date.now()}-${Math.random()}`;
+        setMessages((prev) => ([
+          ...prev,
+          {
+            id: errorId,
+            sender: 'ai',
+            text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
+          },
+        ]));
+      }
+    };
 
-  ws.onclose = (e) => {
-    if (socketRef.current === ws) {
-      socketRef.current = null;
-      setSocket(null);
-    }
+    setSocket(ws);
 
-    if (isCleanup || e.code === 1000) return;
-
-    setIsLoading(false);
-    setPendingOperation(null);
-
-    const errorId = `${Date.now()}-${Math.random()}`;
-    setMessages((prev) => ([
-      ...prev,
-      {
-        id: errorId,
-        sender: 'ai',
-        text: JSON.stringify({ type: 'error', message: 'Verbindung zum Backend verloren.' }),
-      },
-    ]));
-  };
-
-  setSocket(ws);
-
-  return () => {
-    isCleanup = true;
-    if (socketRef.current === ws) {
-      socketRef.current = null;
-      setSocket(null);
-    }
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-      ws.close(1000, 'component cleanup');
-    }
-  };
-}, []);
+    // 4. Cleanup: Close connection when component unmounts
+    return () => {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(1000); 
+      }
+    };
+  }, []); // Empty array keeps the effect from re-running constantly
   
   useEffect(() => {
     if (!document.getElementById('leaflet-css')) {
