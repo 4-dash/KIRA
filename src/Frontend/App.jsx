@@ -769,8 +769,13 @@ export default function App() {
 
     const host = window.location.hostname;
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${host}:8000/chat`;
+    // Logic: add port 8000 if using docker-compose.dev.yml
+    const isDev = import.meta.env.VITE_RUNNING_COMP === 'DEV';
+    const port = isDev ? ':8000' : '';
+
+    const wsUrl = `${wsProtocol}//${host}${port}/chat`;
     const ws = new WebSocket(wsUrl);
+
     socketRef.current = ws;
 
     ws.onopen = () => console.log(`✅ Connected to KIRA Backend at ${wsUrl}`);
