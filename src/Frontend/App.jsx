@@ -783,7 +783,7 @@ export default function App() {
     ws.onmessage = (event) => {
       setIsLoading(false);
       setPendingOperation(null);
-      setDragOverride(null)
+      setDragOverride(null);
       try {
         const parsed = safeJsonParse(event.data);
         if (parsed?.selection) {
