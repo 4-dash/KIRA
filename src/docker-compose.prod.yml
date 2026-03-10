@@ -23,6 +23,10 @@ services:
     networks:
       - default
       - nginx_proxy
+  
+  opensearch-dashboards:
+    ports:
+      - "5601:5601"
 
 networks:
   nginx_proxy:
