@@ -236,6 +236,153 @@ function createPoiMapIcon(L, place = {}) {
 }
 
 
+
+function formatOpeningHours(openingHours) {
+  if (!openingHours) return [];
+
+  const entries = Array.isArray(openingHours) ? openingHours : [openingHours];
+
+  const dayMap = {
+    Monday: 'Mo',
+    Tuesday: 'Di',
+    Wednesday: 'Mi',
+    Thursday: 'Do',
+    Friday: 'Fr',
+    Saturday: 'Sa',
+    Sunday: 'So',
+  };
+
+  const normalizeDay = (value) => {
+    if (!value || typeof value !== 'string') return value;
+    const raw = value.split('/').pop();
+    return dayMap[raw] || raw;
+  };
+
+  const dayOrder = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+
+  const compressDays = (days) => {
+    const normalized = [...new Set((days || []).filter(Boolean))]
+      .sort((a, b) => dayOrder.indexOf(a) - dayOrder.indexOf(b));
+    if (!normalized.length) return '';
+
+    const groups = [];
+    let start = normalized[0];
+    let prevIndex = dayOrder.indexOf(normalized[0]);
+
+    for (let i = 1; i < normalized.length; i += 1) {
+      const current = normalized[i];
+      const currentIndex = dayOrder.indexOf(current);
+      if (currentIndex === prevIndex + 1) {
+        prevIndex = currentIndex;
+        continue;
+      }
+      groups.push(start === dayOrder[prevIndex] ? start : `${start}–${dayOrder[prevIndex]}`);
+      start = current;
+      prevIndex = currentIndex;
+    }
+
+    groups.push(start === dayOrder[prevIndex] ? start : `${start}–${dayOrder[prevIndex]}`);
+    return groups.join(', ');
+  };
+
+  const formatDate = (value) => {
+    if (!value) return null;
+    const [year, month, day] = String(value).split('-');
+    if (!year || !month || !day) return value;
+    return `${day}.${month}.${year}`;
+  };
+
+  const lines = entries
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+
+      const dayValues = Array.isArray(entry.dayOfWeek)
+        ? entry.dayOfWeek.map(normalizeDay)
+        : [normalizeDay(entry.dayOfWeek)];
+
+      const days = compressDays(dayValues);
+      const opens = entry.opens || '?';
+      const closes = entry.closes || '?';
+      const validFrom = formatDate(entry.validFrom);
+      const validThrough = formatDate(entry.validThrough);
+
+      let dateRange = '';
+      if (validFrom && validThrough) {
+        dateRange = ` (${validFrom} – ${validThrough})`;
+      } else if (validFrom) {
+        dateRange = ` (ab ${validFrom})`;
+      } else if (validThrough) {
+        dateRange = ` (bis ${validThrough})`;
+      }
+
+      if (days) return `${days}: ${opens}–${closes}${dateRange}`;
+      return `${opens}–${closes}${dateRange}`;
+    })
+    .filter(Boolean);
+
+  return [...new Set(lines)];
+}
+
+
+function firstNonEmpty(...values) {
+  for (const value of values.flat()) {
+    if (value === undefined || value === null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    return value;
+  }
+  return null;
+}
+
+function getPlaceDescription(place = {}) {
+  const raw = firstNonEmpty(
+    place.description,
+    place.short_description,
+    place.summary,
+    place.details,
+    place.text,
+    place.content,
+  );
+
+  if (Array.isArray(raw)) {
+    return raw.filter(Boolean).join('\n\n') || 'Keine Beschreibung verfügbar.';
+  }
+  if (raw && typeof raw === 'object') {
+    return Object.values(raw).filter(Boolean).join('\n\n') || 'Keine Beschreibung verfügbar.';
+  }
+  return String(raw || 'Keine Beschreibung verfügbar.');
+}
+
+function getPlaceAddress(place = {}) {
+  return firstNonEmpty(
+    place.address,
+    place.full_address,
+    place.address_text,
+    [place.street, place.house_number, place.postcode, place.city].filter(Boolean).join(', '),
+    [place.street, place.city].filter(Boolean).join(', '),
+    place?.address?.streetAddress,
+    [place?.address?.streetAddress, place?.address?.postalCode, place?.address?.addressLocality].filter(Boolean).join(', '),
+  );
+}
+
+function getPlaceWebsite(place = {}) {
+  return firstNonEmpty(place.website, place.url, place.link, place?.address?.url);
+}
+
+function getPlacePhone(place = {}) {
+  return firstNonEmpty(place.telephone, place.phone, place?.address?.telephone);
+}
+
+function getPlaceOpeningHours(place = {}) {
+  return firstNonEmpty(place.opening_hours, place.openingHoursSpecification, place.openingHours, place.openinghours);
+}
+
+function getPlaceDateRange(place = {}) {
+  return {
+    startDate: firstNonEmpty(place.start_date, place.startDate, place.validFrom),
+    endDate: firstNonEmpty(place.end_date, place.endDate, place.validThrough),
+  };
+}
+
 function buildSelectionPayload({ kind, messageId, planData, step, leg, dayIndex, stepIndex, legIndex, activity }) {
   if (!kind) return null;
   if (kind === 'trip') {
@@ -407,7 +554,7 @@ function SelectionBanner({ selection, dragOverride, pendingOperation, onClear })
             </div>
           )}
           <div className="text-slate-500">
-            Nächste Chat-Nachricht wird als Änderung für das ausgewählte Element gesendet.
+            Änderungen werden erst angewendet, wenn du unten eine Aktion auswählst oder ein Element auf der Karte verschiebst.
           </div>
         </div>
         <button onClick={onClear} className="rounded-lg bg-white px-3 py-1 font-bold text-slate-600 border border-slate-200">
@@ -418,27 +565,156 @@ function SelectionBanner({ selection, dragOverride, pendingOperation, onClear })
   );
 }
 
-function SinglePlaceCard({ place, isSelected, onSelect }) {
+function SinglePlaceCard({ place, isSelected, onSelect, selectionMode = 'single', isChecked = false }) {
   const meta = getCategoryMeta(place);
   const PlaceIcon = meta.icon;
+  const [isExpanded, setIsExpanded] = useState(false);
+  const description = getPlaceDescription(place);
+  const address = getPlaceAddress(place);
+  const phone = getPlacePhone(place);
+  const website = getPlaceWebsite(place);
+  const { startDate, endDate } = getPlaceDateRange(place);
+  const formattedOpeningHours = formatOpeningHours(getPlaceOpeningHours(place));
+
+  const previewStyle = {
+    whiteSpace: 'normal',
+    overflow: 'hidden',
+    display: '-webkit-box',
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: 'vertical',
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+  };
+
+  const fullDescriptionStyle = {
+    whiteSpace: 'pre-wrap',
+    overflow: 'visible',
+    display: 'block',
+    height: 'auto',
+    maxHeight: 'none',
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+  };
+
   return (
-    <button
-      onClick={onSelect}
-      className={`w-full text-left rounded-xl border p-4 shadow-sm transition ${isSelected ? 'border-slate-800 ring-2 ring-slate-200 bg-slate-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}
+    <div
+      className={`w-full text-left rounded-xl border p-4 shadow-sm transition ${
+        isSelected
+          ? 'border-slate-800 ring-2 ring-slate-200 bg-slate-50'
+          : 'border-slate-200 bg-white hover:border-slate-300'
+      }`}
     >
-      <div className="flex gap-4">
-        <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 border ${meta.chip}`}>
-          <PlaceIcon size={18} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="mb-1 flex flex-wrap items-center gap-2">
-            <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${meta.chip}`}>{meta.label}</span>
+      <button type="button" onClick={onSelect} className="w-full text-left">
+        <div className="flex gap-4">
+          {selectionMode === 'multi' && (
+            <div
+              className={`mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-md border text-[11px] font-bold ${
+                isChecked
+                  ? 'border-slate-800 bg-slate-800 text-white'
+                  : 'border-slate-300 bg-white text-transparent'
+              }`}
+            >
+              ✓
+            </div>
+          )}
+
+          <div className={`h-10 w-10 rounded-full flex items-center justify-center shrink-0 border ${meta.chip}`}>
+            <PlaceIcon size={18} />
           </div>
-          <p className="text-xs text-slate-600 line-clamp-2">{place.description}</p>
+
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex flex-wrap items-center gap-2">
+              <h4 className="font-bold text-slate-800 text-sm">{place.name}</h4>
+              <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${meta.chip}`}>
+                {meta.label}
+              </span>
+            </div>
+
+            {!isExpanded && (
+              <div className="text-xs text-slate-600 leading-5" style={previewStyle}>
+                {description}
+              </div>
+            )}
+          </div>
         </div>
+      </button>
+
+      {isExpanded && (
+        <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-left">
+          <div className="text-xs text-slate-600 leading-5" style={fullDescriptionStyle}>
+            {description}
+          </div>
+
+          {(address || phone || website || startDate || endDate || formattedOpeningHours.length > 0) && (
+            <div className="mt-3 space-y-1 border-t border-slate-200 pt-3 text-xs text-slate-600">
+              {address && (
+                <div>
+                  <span className="font-semibold text-slate-700">Adresse:</span> {address}
+                </div>
+              )}
+
+              {phone && (
+                <div>
+                  <span className="font-semibold text-slate-700">Telefon:</span> {phone}
+                </div>
+              )}
+
+              {formattedOpeningHours.length > 0 && (
+                <div>
+                  <span className="font-semibold text-slate-700">Öffnungszeiten:</span>
+                  <div className="mt-1 space-y-1">
+                    {formattedOpeningHours.map((line, idx) => (
+                      <div key={idx} className="text-xs text-slate-600">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {website && (
+                <div>
+                  <span className="font-semibold text-slate-700">Website:</span>{' '}
+                  <a
+                    href={website}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-blue-600 underline"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {website}
+                  </a>
+                </div>
+              )}
+
+              {(startDate || endDate) && (
+                <div>
+                  <span className="font-semibold text-slate-700">Zeitraum:</span>{' '}
+                  {startDate || '?'}
+                  {endDate ? ` – ${endDate}` : ''}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center justify-between gap-2 text-xs">
+        <button
+          type="button"
+          onClick={() => setIsExpanded((prev) => !prev)}
+          className="font-bold text-slate-500 hover:text-slate-700"
+        >
+          {isExpanded ? 'Beschreibung einklappen' : 'Beschreibung aufklappen'}
+        </button>
+
+        {Number.isFinite(place?.lat) && Number.isFinite(place?.lon) && (
+          <span className="text-slate-400">
+            {place.lat.toFixed(4)}, {place.lon.toFixed(4)}
+          </span>
+        )}
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -454,56 +730,139 @@ function TripCard({
   stepIndex,
   onQuickAction,
 }) {
+  const [isExpanded, setIsExpanded] = useState(true);
+  const [openLegs, setOpenLegs] = useState({});
   if (!data?.legs) return null;
+
+  const toggleLeg = (index) => setOpenLegs((prev) => ({ ...prev, [index]: !prev[index] }));
+
   return (
     <div className={`w-full max-w-md rounded-2xl border shadow-sm overflow-hidden my-3 ${isFocused ? 'border-slate-800 ring-2 ring-slate-200' : 'border-slate-200 bg-white'}`}>
-      <button onClick={onFocusTrip} className="w-full bg-slate-50 p-4 border-b border-slate-100 flex justify-between items-center text-left hover:bg-slate-100">
-        <div>
-          <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
-            {data.start} <ArrowRight size={14} /> {data.end}
-          </div>
-          <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-            <Clock size={12} /> {data.date} • {data.total_duration} Min.
-          </div>
-          {title && <div className="text-xs mt-2 font-bold uppercase tracking-wider text-slate-400">{title}</div>}
-        </div>
-        <div className="bg-slate-200 text-slate-700 px-2 py-1 rounded-lg text-xs font-bold">Fokus</div>
-      </button>
-      <div className="px-4 pt-3 flex gap-2">
-        <button type="button" onClick={() => onQuickAction?.({ operation: 'regenerate_trip', scope: 'trip' })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:border-slate-300">Neu berechnen</button>
-      </div>
-      <div className="p-4 relative">
-        {data.legs.map((leg, index) => {
-          const Icon = modeIcon(leg.mode);
-          const isLegSelected =
-            selection?.selection_type === 'leg' &&
-            selection?.message_id === messageId &&
-            selection?.day_index === dayIndex &&
-            selection?.step_index === stepIndex &&
-            selection?.leg_index === index;
-          const isLast = index === data.legs.length - 1;
-          return (
-            <button
-              key={`${leg.from}-${leg.to}-${index}`}
-              onClick={() => onFocusLeg(leg, index)}
-              className={`flex w-full gap-3 relative pb-6 last:pb-0 text-left rounded-xl px-2 ${isLegSelected ? 'bg-slate-50 ring-1 ring-slate-200' : 'hover:bg-slate-50'}`}
-            >
-              {!isLast && <div className="absolute left-[26px] top-8 bottom-0 w-0.5 bg-slate-200" />}
-              <div className="w-12 text-xs font-bold text-slate-500 pt-2 text-right">{leg.start_time}</div>
-              <div className="relative z-10">
-                <div className={`h-8 w-8 rounded-full border-2 flex items-center justify-center ${modeColor(leg.mode)}`}>
-                  <Icon size={14} />
-                </div>
-              </div>
-              <div className="flex-1 pt-1">
-                <div className="mb-2 flex justify-end">
-                  <span onClick={(event) => { event.stopPropagation(); onQuickAction?.({ operation: 'regenerate_leg', scope: 'leg', legIndex: index }); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-500">Leg neu</span>
-                </div>
-                <div className="font-bold text-sm text-slate-700">{leg.mode === 'WALK' ? 'Fußweg' : `${leg.mode} ${leg.line || ''}`}</div>
-                <div className="text-xs text-slate-500">{leg.from} <span className="text-slate-300">→</span> {leg.to}</div>
-                <div className="text-[11px] text-slate-400 mt-1">{leg.duration} Min.</div>
-              </div>
+      <div className="w-full bg-slate-50 p-4 border-b border-slate-100">
+        <div className="flex justify-between items-start gap-3">
+          <button onClick={onFocusTrip} className="flex-1 text-left hover:opacity-90">
+            <div className="flex items-center gap-2 text-slate-800 font-bold text-sm">
+              {data.start} <ArrowRight size={14} /> {data.end}
+            </div>
+            <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+              <Clock size={12} /> {data.date} • {data.total_duration} Min.
+            </div>
+            {title && <div className="text-xs mt-2 font-bold uppercase tracking-wider text-slate-400">{title}</div>}
+          </button>
+          <div className="flex flex-col items-end gap-2">
+            <button type="button" onClick={onFocusTrip} className="bg-slate-200 text-slate-700 px-2 py-1 rounded-lg text-xs font-bold">Fokus</button>
+            <button type="button" onClick={() => setIsExpanded((prev) => !prev)} className="text-[11px] font-bold text-slate-500 hover:text-slate-700">
+              {isExpanded ? 'Trip einklappen' : 'Trip aufklappen'}
             </button>
+          </div>
+        </div>
+      </div>
+      {isExpanded && (
+        <>
+          <div className="px-4 pt-3 flex gap-2">
+            <button type="button" onClick={() => onQuickAction?.({ operation: 'regenerate_trip', scope: 'trip' })} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:border-slate-300">Neu berechnen</button>
+          </div>
+          <div className="p-4 relative">
+            {data.legs.map((leg, index) => {
+              const Icon = modeIcon(leg.mode);
+              const isLegSelected =
+                selection?.selection_type === 'leg' &&
+                selection?.message_id === messageId &&
+                selection?.day_index === dayIndex &&
+                selection?.step_index === stepIndex &&
+                selection?.leg_index === index;
+              const isLast = index === data.legs.length - 1;
+              return (
+                <button
+                  key={`${leg.from}-${leg.to}-${index}`}
+                  onClick={() => onFocusLeg(leg, index)}
+                  className={`flex w-full gap-3 relative pb-6 last:pb-0 text-left rounded-xl px-2 ${isLegSelected ? 'bg-slate-50 ring-1 ring-slate-200' : 'hover:bg-slate-50'}`}
+                >
+                  {!isLast && <div className="absolute left-[26px] top-8 bottom-0 w-0.5 bg-slate-200" />}
+                  <div className="w-12 text-xs font-bold text-slate-500 pt-2 text-right">{leg.start_time}</div>
+                  <div className="relative z-10">
+                    <div className={`h-8 w-8 rounded-full border-2 flex items-center justify-center ${modeColor(leg.mode)}`}>
+                      <Icon size={14} />
+                    </div>
+                  </div>
+                  <div className="flex-1 pt-1">
+                    <div className="mb-2 flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-bold text-sm text-slate-700">{leg.mode === 'WALK' ? 'Fußweg' : `${leg.mode} ${leg.line || ''}`}</div>
+                        <div className="text-xs text-slate-500">{leg.from} <span className="text-slate-300">→</span> {leg.to}</div>
+                        <div className="text-[11px] text-slate-400 mt-1">{leg.duration} Min.</div>
+                      </div>
+                      <div className="flex flex-col items-end gap-2">
+                        <button type="button" onClick={(event) => { event.stopPropagation(); onQuickAction?.({ operation: 'regenerate_leg', scope: 'leg', legIndex: index }); }} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-500">Leg neu</button>
+                        <button type="button" onClick={(event) => { event.stopPropagation(); toggleLeg(index); }} className="text-[10px] font-bold text-slate-500 hover:text-slate-700">{openLegs[index] ? 'Details ausblenden' : 'Details anzeigen'}</button>
+                      </div>
+                    </div>
+                    {openLegs[index] && (
+                      <div className="rounded-xl border border-slate-100 bg-slate-50 p-3 text-[11px] text-slate-600 space-y-1">
+                        {leg.route_long_name && <div><span className="font-bold text-slate-700">Linie:</span> {leg.route_long_name}</div>}
+                        {leg.headsign && <div><span className="font-bold text-slate-700">Richtung:</span> {leg.headsign}</div>}
+                        <div><span className="font-bold text-slate-700">Start:</span> {leg.from}</div>
+                        {leg.from_stop_name && leg.from_stop_name !== leg.from && <div><span className="font-bold text-slate-700">Station Start:</span> {leg.from_stop_name}</div>}
+                        {leg.from_platform && <div><span className="font-bold text-slate-700">Gleis/Steig Start:</span> {leg.from_platform}</div>}
+                        <div><span className="font-bold text-slate-700">Ziel:</span> {leg.to}</div>
+                        {leg.to_stop_name && leg.to_stop_name !== leg.to && <div><span className="font-bold text-slate-700">Station Ziel:</span> {leg.to_stop_name}</div>}
+                        {leg.to_platform && <div><span className="font-bold text-slate-700">Gleis/Steig Ziel:</span> {leg.to_platform}</div>}
+                        {Array.isArray(leg.stops) && leg.stops.length > 0 && <div><span className="font-bold text-slate-700">Zwischenhalte:</span> {leg.stops.length}</div>}
+                      </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function ActivityList({ data, onSelectActivity, selectedActivityName, messageId, selectedActivities = [], onToggleActivitySelection, onStartTripPlanningFromPois }) {
+  const selectedCount = selectedActivities.length;
+  return (
+    <div className="w-full mt-3 space-y-3">
+      <p className="text-sm text-slate-500 font-medium">Ich habe {data.items.length} Vorschläge für {data.location} gefunden:</p>
+      <div className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-bold text-slate-800">Mehrere POIs für die Reiseplanung auswählen</div>
+            <div className="text-xs text-slate-500">Ausgewählt: {selectedCount}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onStartTripPlanningFromPois?.()}
+            disabled={!selectedCount}
+            className={`rounded-xl px-3 py-2 text-xs font-bold ${selectedCount ? 'bg-slate-800 text-white hover:bg-slate-700' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+          >
+            Mit Auswahl Reise planen
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-3">
+        {data.items.map((item, idx) => {
+          const isChecked = selectedActivities.some((poi) => poi.name === item.name);
+          return (
+            <SinglePlaceCard
+              key={`${item.name}-${idx}`}
+              place={item}
+              selectionMode="multi"
+              isChecked={isChecked}
+              isSelected={selectedActivityName === item.name || isChecked}
+              onSelect={() => {
+                onSelectActivity(
+                  buildSelectionPayload({
+                    kind: 'activity',
+                    messageId,
+                    activity: item,
+                  }),
+                );
+                onToggleActivitySelection?.(item);
+              }}
+            />
           );
         })}
       </div>
@@ -511,38 +870,56 @@ function TripCard({
   );
 }
 
-function ActivityList({ data, onSelectActivity, selectedActivityName, messageId }) {
+function RequestStateCard({ parsed }) {
+  const state = parsed?.request_state || {};
+  const chips = [
+    state.trip_type ? ['Typ', state.trip_type] : null,
+    state.start ? ['Start', state.start] : null,
+    state.end ? ['Ziel', state.end] : null,
+    state.base_location ? ['Basis', state.base_location] : null,
+    state.days ? ['Tage', String(state.days)] : null,
+    state.pace ? ['Pace', state.pace] : null,
+    state.activities_per_day ? ['Akt./Tag', String(state.activities_per_day)] : null,
+    state.interest ? ['Interesse', state.interest] : null,
+    state.date ? ['Datum', state.date] : null,
+    Array.isArray(state.selected_pois) && state.selected_pois.length ? ['POIs', state.selected_pois.join(', ')] : null,
+  ].filter(Boolean);
+
   return (
-    <div className="w-full mt-3 space-y-3">
-      <p className="text-sm text-slate-500 font-medium">Ich habe {data.items.length} Vorschläge für {data.location} gefunden:</p>
-      <div className="grid grid-cols-1 gap-3">
-        {data.items.map((item, idx) => (
-          <SinglePlaceCard
-            key={`${item.name}-${idx}`}
-            place={item}
-            isSelected={selectedActivityName === item.name}
-            onSelect={() =>
-              onSelectActivity(
-                buildSelectionPayload({
-                  kind: 'activity',
-                  messageId,
-                  activity: item,
-                }),
-              )
-            }
-          />
-        ))}
+    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-slate-700 shadow-sm">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 rounded-full bg-amber-100 p-2 text-amber-700">
+          <AlertCircle size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-bold uppercase tracking-wider text-amber-700">Rückfrage</div>
+          <p className="mt-1 text-sm font-medium text-slate-800">{parsed?.question}</p>
+          {!!chips.length && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {chips.map(([label, value]) => (
+                <div key={`${label}-${value}`} className="rounded-full border border-amber-200 bg-white px-3 py-1 text-xs text-slate-700">
+                  <span className="font-bold text-slate-800">{label}:</span> {value}
+                </div>
+              ))}
+            </div>
+          )}
+          {Array.isArray(parsed?.missing_fields) && parsed.missing_fields.length > 0 && (
+            <div className="mt-3 text-xs text-slate-600">
+              Noch offen: {parsed.missing_fields.join(', ')}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-function ChatMessage({ msg, selection, onSelect, onChooseOperation }) {
+function ChatMessage({ msg, selection, onSelect, onChooseOperation, selectedPois, onTogglePoiSelection, onStartTripPlanningFromPois }) {
   const isAi = msg.sender === 'ai';
   const [isSaved, setIsSaved] = useState(false);
   const parsed = msg.parsed;
   const parsedError = parsed?.type === 'error' ? (parsed.message || parsed.error) : parsed?.error;
-  const displayText = parsedError ? parsedError : (parsed ? parsed.intro || '' : msg.text);
+  const displayText = parsedError ? parsedError : (parsed?.type === 'clarification_question' ? '' : (parsed ? parsed.intro || '' : msg.text));
 
   const handleSaveTrip = async () => {
     const dataToSave = parsed;
@@ -602,7 +979,9 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation }) {
             />
           )}
 
-          {(parsed?.type === 'error' || parsed?.error || parsed?.message) && !parsed?.legs && parsed?.type !== 'multi_step_plan' && parsed?.type !== 'activity_list' && (
+          {parsed?.type === 'clarification_question' && <RequestStateCard parsed={parsed} />}
+
+          {(parsed?.type === 'error' || parsed?.error || parsed?.message) && !parsed?.legs && parsed?.type !== 'multi_step_plan' && parsed?.type !== 'activity_list' && parsed?.type !== 'clarification_question' && (
             <div className="mt-3 bg-red-50 p-3 rounded-xl border border-red-100 flex gap-3 items-center text-red-600">
               <AlertCircle size={18} className="shrink-0" />
               <div className="flex flex-col">
@@ -616,7 +995,10 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation }) {
               data={parsed}
               messageId={msg.id}
               selectedActivityName={isSelectedActivityMessage ? selection?.name : null}
+              selectedActivities={selectedPois?.[msg.id] || []}
               onSelectActivity={onSelect}
+              onToggleActivitySelection={onTogglePoiSelection ? (item) => onTogglePoiSelection(msg.id, item, parsed) : undefined}
+              onStartTripPlanningFromPois={onStartTripPlanningFromPois ? () => onStartTripPlanningFromPois(msg.id, parsed) : undefined}
             />
           )}
 
@@ -731,6 +1113,11 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation }) {
   );
 }
 
+
+function hasActiveEditIntent(selection, pendingOperation, dragOverride) {
+  return Boolean(selection && (pendingOperation?.operation || dragOverride));
+}
+
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([INITIAL_MESSAGE]);
@@ -743,12 +1130,11 @@ export default function App() {
   const [selection, setSelection] = useState(null);
   const [dragOverride, setDragOverride] = useState(null);
   const [pendingOperation, setPendingOperation] = useState(null);
+  const [selectedPoisByMessage, setSelectedPoisByMessage] = useState({});
   const [sessionId] = useState(() => {
-    const existing = window.localStorage.getItem('kira-session-id');
-    if (existing) return existing;
-    const created = window.crypto?.randomUUID?.() || `kira-${Date.now()}`;
-    window.localStorage.setItem('kira-session-id', created);
-    return created;
+    // Always start a fresh backend session on every full page load.
+    // This prevents old follow-up/question state from leaking into a new chat after F5.
+    return window.crypto?.randomUUID?.() || `kira-${Date.now()}`;
   });
 
   const mapContainerRef = useRef(null);
@@ -1008,6 +1394,46 @@ export default function App() {
     setPendingOperation(null);
   };
 
+
+  const togglePoiSelection = (messageId, poi, parsedData) => {
+    setSelectedPoisByMessage((prev) => {
+      const current = prev[messageId] || [];
+      const exists = current.some((item) => item.name === poi.name);
+      const nextItems = exists ? current.filter((item) => item.name !== poi.name) : [...current, { ...poi, source_location: parsedData?.location }];
+      return { ...prev, [messageId]: nextItems };
+    });
+  };
+
+  const startTripPlanningFromPois = (messageId, parsedData) => {
+    const selectedPois = selectedPoisByMessage[messageId] || [];
+    if (!selectedPois.length) return;
+
+    const poiNames = selectedPois.map((poi) => poi.name).join(', ');
+    const location = parsedData?.location || selectedPois[0]?.source_location || 'dem Zielort';
+    const intentText = `Plane eine Reise mit diesen ausgewählten POIs in ${location}: ${poiNames}`;
+
+    setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text: intentText }]);
+    setIsLoading(true);
+
+    const payload = {
+      type: 'chat_request',
+      session_id: sessionId,
+      text: intentText,
+      selected_pois: selectedPois,
+      selection: null,
+      edit_operation: null,
+      drag_override: null,
+      current_trip: null,
+    };
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify(payload));
+    } else {
+      setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: '⚠️ Keine Verbindung zum Server. Läuft das Backend?' }]);
+      setIsLoading(false);
+    }
+  };
+
   const handleFileChange = (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -1036,15 +1462,17 @@ export default function App() {
     setIsLoading(true);
 
     const enrichedSelection = enrichSelectionWithPlanContext(selection, latestRenderable?.data || null);
-    const effectiveOperation = pendingOperation || inferOperationFromSelection(enrichedSelection, userText, dragOverride);
+    const effectiveOperation = pendingOperation || (dragOverride ? inferOperationFromSelection(enrichedSelection, userText, dragOverride) : null);
+    const shouldSendSelectionContext = hasActiveEditIntent(enrichedSelection, effectiveOperation, dragOverride);
     const payload = {
       type: 'chat_request',
       session_id: sessionId,
       text: userText,
-      selection: enrichedSelection,
+      selection: shouldSendSelectionContext ? enrichedSelection : null,
+      selected_pois: Object.values(selectedPoisByMessage).flat(),
       edit_operation: effectiveOperation,
-      drag_override: dragOverride,
-      current_trip: latestRenderable?.data || null,
+      drag_override: shouldSendSelectionContext ? dragOverride : null,
+      current_trip: shouldSendSelectionContext ? (latestRenderable?.data || null) : null,
     };
 
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -1072,7 +1500,16 @@ export default function App() {
 
         <div className="flex-1 overflow-y-auto p-4 bg-slate-50 space-y-4">
           {parsedMessages.map((msg) => (
-            <ChatMessage key={msg.id} msg={msg} selection={selection} onSelect={(next) => { setSelection(next); setDragOverride(null); setPendingOperation(null); }} onChooseOperation={(operation) => setPendingOperation(operation)} />
+            <ChatMessage
+              key={msg.id}
+              msg={msg}
+              selection={selection}
+              selectedPois={selectedPoisByMessage}
+              onTogglePoiSelection={togglePoiSelection}
+              onStartTripPlanningFromPois={startTripPlanningFromPois}
+              onSelect={(next) => { setSelection(next); setDragOverride(null); setPendingOperation(null); }}
+              onChooseOperation={(operation) => setPendingOperation(operation)}
+            />
           ))}
           {isLoading && <div className="text-slate-500 text-sm ml-4">KIRA denkt nach... <Loader2 className="inline animate-spin" /></div>}
           <div ref={messagesEndRef} />
@@ -1085,7 +1522,7 @@ export default function App() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder={selection ? `Änderung für ${selection.label || selection.selection_type} eingeben…` : 'Wohin möchtest du reisen?'}
+              placeholder={hasActiveEditIntent(selection, pendingOperation, dragOverride) ? `Änderung für ${selection?.label || selection?.selection_type} eingeben…` : 'Wohin möchtest du reisen?'}
               className="flex-1 bg-slate-100 rounded-2xl py-3 pl-5 pr-4 focus:outline-none"
             />
             <button type="submit" className="p-3 bg-slate-700 text-white rounded-xl">
