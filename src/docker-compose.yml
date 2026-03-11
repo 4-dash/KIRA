@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
 
   opensearch:
-    image: opensearchproject/opensearch:latest
+    image: opensearchproject/opensearch:2.11.1
     environment:
       - discovery.type=single-node
       - DISABLE_SECURITY_PLUGIN=true
@@ -27,7 +27,7 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - opensearch-data:/usr/share/opensearch/data
+      - kira-opensearch-data:/usr/share/opensearch/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
@@ -37,7 +37,7 @@ services:
       start_period: 30s
 
   opensearch-dashboards:
-    image: opensearchproject/opensearch-dashboards:latest
+    image: opensearchproject/opensearch-dashboards:2.11.1
     container_name: opensearch-dashboard
     restart: unless-stopped
     environment:
@@ -110,3 +110,6 @@ services:
     command: ["python", "bayerncloud_fetch.py"]
     restart: "no"
 
+volumes:
+  kira-opensearch-data:
+  bc-data:

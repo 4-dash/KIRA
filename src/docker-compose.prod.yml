@@ -34,6 +34,4 @@ networks:
 
 volumes:
   opensearch-data:
-    external: true
-    name: kira-project_os_data
   bc-data:

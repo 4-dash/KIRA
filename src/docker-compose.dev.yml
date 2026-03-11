@@ -18,7 +18,7 @@ services:
       # tells which compse we are running to select the correct port
       - VITE_RUNNING_COMP=DEV
     ports:
-      - "5173:5173"
+      - "5173:80"
 
 volumes:
   opensearch-data:
