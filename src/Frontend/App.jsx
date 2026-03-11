@@ -47,6 +47,26 @@ function safeJsonParse(value) {
   }
 }
 
+function getBackendBaseUrl() {
+  const protocol = window.location.protocol;
+  const host = window.location.hostname;
+  const isDev = import.meta.env.VITE_RUNNING_COMP === 'DEV';
+  if (isDev) {
+    return `${protocol}//${host}:8000`;
+  }
+  return `${protocol}//${host}`;
+}
+
+function buildPoiKey(place = {}) {
+  const name = String(place.name || place.id || '').trim().toLowerCase();
+  const lat = Number(place.lat);
+  const lon = Number(place.lon);
+  const latPart = Number.isFinite(lat) ? lat.toFixed(6) : 'na';
+  const lonPart = Number.isFinite(lon) ? lon.toFixed(6) : 'na';
+  return `${name}__${latPart}__${lonPart}`;
+}
+
+
 function decodePolyline(encoded) {
   if (!encoded) return [];
   const poly = [];
@@ -844,7 +864,7 @@ function ActivityList({ data, onSelectActivity, selectedActivityName, messageId,
       </div>
       <div className="grid grid-cols-1 gap-3">
         {data.items.map((item, idx) => {
-          const isChecked = selectedActivities.some((poi) => poi.name === item.name);
+          const isChecked = selectedActivities.some((poi) => buildPoiKey(poi) === buildPoiKey(item));
           return (
             <SinglePlaceCard
               key={`${item.name}-${idx}`}
@@ -865,6 +885,76 @@ function ActivityList({ data, onSelectActivity, selectedActivityName, messageId,
             />
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+
+function MapPoiDetailsPanel({ poi, isSelected, onToggleSelection, onAddToTrip, onClose }) {
+  if (!poi) return null;
+  const openingHours = formatOpeningHours(getPlaceOpeningHours(poi));
+  const website = getPlaceWebsite(poi);
+  const phone = getPlacePhone(poi);
+  const address = getPlaceAddress(poi);
+  const description = getPlaceDescription(poi);
+  const { startDate, endDate } = getPlaceDateRange(poi);
+  const meta = getCategoryMeta(poi);
+  const Icon = meta.icon;
+
+  return (
+    <div className="absolute right-8 top-24 z-[1000] w-[24rem] max-w-[calc(100%-2rem)] rounded-3xl border border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur-md">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs font-bold text-slate-600">
+            <Icon size={14} /> {meta.label}
+          </div>
+          <h3 className="text-lg font-bold text-slate-900">{poi.name}</h3>
+          {(poi.city || address) && <p className="mt-1 text-sm text-slate-500">{poi.city || address}</p>}
+        </div>
+        <button type="button" onClick={onClose} className="rounded-xl border border-slate-200 p-2 text-slate-500 hover:bg-slate-50">
+          <X size={16} />
+        </button>
+      </div>
+
+      <div className="mt-4 space-y-3 text-sm text-slate-700">
+        {address && <div><span className="font-bold text-slate-900">Adresse:</span> {address}</div>}
+        {phone && <div><span className="font-bold text-slate-900">Telefon:</span> {phone}</div>}
+        {website && (
+          <div>
+            <span className="font-bold text-slate-900">Website:</span>{' '}
+            <a href={website} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">{website}</a>
+          </div>
+        )}
+        {(startDate || endDate) && (
+          <div><span className="font-bold text-slate-900">Zeitraum:</span> {startDate || '—'} {endDate ? `– ${endDate}` : ''}</div>
+        )}
+        {description && <p className="max-h-40 overflow-y-auto whitespace-pre-line rounded-2xl bg-slate-50 p-3 text-sm">{description}</p>}
+        {openingHours.length > 0 && (
+          <div>
+            <div className="mb-2 font-bold text-slate-900">Öffnungszeiten</div>
+            <div className="space-y-1 text-xs text-slate-600">
+              {openingHours.map((line) => <div key={line}>{line}</div>)}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-5 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={onToggleSelection}
+          className={`rounded-xl px-4 py-2 text-sm font-bold ${isSelected ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-slate-800 text-white hover:bg-slate-700'}`}
+        >
+          {isSelected ? 'Auswahl entfernen' : 'POI auswählen'}
+        </button>
+        <button
+          type="button"
+          onClick={onAddToTrip}
+          className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-50"
+        >
+          In Trip übernehmen
+        </button>
       </div>
     </div>
   );
@@ -925,9 +1015,7 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation, selectedPois
     const dataToSave = parsed;
     if (!dataToSave) return;
     try {
-      const protocol = window.location.protocol;
-      const host = window.location.hostname;
-      const response = await fetch(`${protocol}//${host}:8000/api/save_trip`, {
+      const response = await fetch(`${getBackendBaseUrl()}/api/save_trip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(dataToSave),
@@ -995,9 +1083,9 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation, selectedPois
               data={parsed}
               messageId={msg.id}
               selectedActivityName={isSelectedActivityMessage ? selection?.name : null}
-              selectedActivities={selectedPois?.[msg.id] || []}
+              selectedActivities={selectedPois || []}
               onSelectActivity={onSelect}
-              onToggleActivitySelection={onTogglePoiSelection ? (item) => onTogglePoiSelection(msg.id, item, parsed) : undefined}
+              onToggleActivitySelection={onTogglePoiSelection ? (item) => onTogglePoiSelection(item, parsed) : undefined}
               onStartTripPlanningFromPois={onStartTripPlanningFromPois ? () => onStartTripPlanningFromPois(msg.id, parsed) : undefined}
             />
           )}
@@ -1130,7 +1218,13 @@ export default function App() {
   const [selection, setSelection] = useState(null);
   const [dragOverride, setDragOverride] = useState(null);
   const [pendingOperation, setPendingOperation] = useState(null);
-  const [selectedPoisByMessage, setSelectedPoisByMessage] = useState({});
+  const [selectedPoiMap, setSelectedPoiMap] = useState({});
+  const [showPoiMarkers, setShowPoiMarkers] = useState(true);
+  const [poiCategoryFilter, setPoiCategoryFilter] = useState('Alle');
+  const [poiTripFilter, setPoiTripFilter] = useState('all');
+  const [mapPois, setMapPois] = useState([]);
+  const [activePoi, setActivePoi] = useState(null);
+  const [poiFetchError, setPoiFetchError] = useState(null);
   const [sessionId] = useState(() => {
     // Always start a fresh backend session on every full page load.
     // This prevents old follow-up/question state from leaking into a new chat after F5.
@@ -1141,11 +1235,32 @@ export default function App() {
   const messagesEndRef = useRef(null);
   const mapInstanceRef = useRef(null);
   const routeLayerRef = useRef(null);
+  const externalPoiLayerRef = useRef(null);
   const fileInputRef = useRef(null);
   const draggableMarkersRef = useRef([]);
 
   const parsedMessages = useMemo(() => getParsedMessages(messages), [messages]);
   const latestRenderable = useMemo(() => getLatestRenderablePlan(parsedMessages), [parsedMessages]);
+  const selectedPois = useMemo(() => Object.values(selectedPoiMap), [selectedPoiMap]);
+  const availablePoiCategories = useMemo(() => ['Alle', ...Array.from(new Set(mapPois.map((poi) => getCategoryMeta(poi).label))).sort()], [mapPois]);
+  const tripPoiNames = useMemo(() => {
+    const names = [];
+    const planData = latestRenderable?.data;
+    if (planData?.type === 'activity_list') {
+      planData.items?.forEach((item) => item?.name && names.push(item.name));
+    } else if (planData?.type === 'multi_step_plan') {
+      planData.steps?.forEach((step) => {
+        if (step?.type === 'activity' && step?.data?.name) names.push(step.data.name);
+      });
+    }
+    return names;
+  }, [latestRenderable]);
+  const filteredMapPois = useMemo(() => {
+    if (poiTripFilter === 'trip_only') return mapPois.filter((poi) => poi?.is_trip_poi);
+    if (poiTripFilter === 'non_trip') return mapPois.filter((poi) => !poi?.is_trip_poi);
+    if (poiTripFilter === 'selected') return mapPois.filter((poi) => Boolean(selectedPoiMap[buildPoiKey(poi)]));
+    return mapPois;
+  }, [mapPois, poiTripFilter, selectedPoiMap]);
 
   useEffect(() => {
 
@@ -1250,6 +1365,91 @@ export default function App() {
 
     return () => clearInterval(checkL);
   }, []);
+
+  const fetchVisiblePois = React.useCallback(async () => {
+    if (!isMapReady || !mapInstanceRef.current) return;
+    const bounds = mapInstanceRef.current.getBounds();
+
+    try {
+      setPoiFetchError(null);
+      const response = await fetch(`${getBackendBaseUrl()}/api/pois/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          north: bounds.getNorth(),
+          south: bounds.getSouth(),
+          east: bounds.getEast(),
+          west: bounds.getWest(),
+          limit: 300,
+          category: poiCategoryFilter,
+          include_names: tripPoiNames,
+          trip_mode: 'all',
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || result?.error) {
+        throw new Error(result?.error || 'POIs konnten nicht geladen werden.');
+      }
+      setMapPois(Array.isArray(result?.pois) ? result.pois : []);
+    } catch (error) {
+      setPoiFetchError(error.message || 'POIs konnten nicht geladen werden.');
+      setMapPois([]);
+    }
+  }, [isMapReady, poiCategoryFilter, tripPoiNames]);
+
+  useEffect(() => {
+    if (!isMapReady || !mapInstanceRef.current) return undefined;
+    const map = mapInstanceRef.current;
+    const handler = () => {
+      fetchVisiblePois();
+    };
+    map.on('moveend', handler);
+    map.on('zoomend', handler);
+    handler();
+    const timer = setTimeout(handler, 300);
+    return () => {
+      clearTimeout(timer);
+      map.off('moveend', handler);
+      map.off('zoomend', handler);
+    };
+  }, [isMapReady, fetchVisiblePois]);
+
+  useEffect(() => {
+    if (!isMapReady || !mapInstanceRef.current || !window.L) return;
+    if (!externalPoiLayerRef.current) {
+      externalPoiLayerRef.current = window.L.layerGroup().addTo(mapInstanceRef.current);
+    }
+    externalPoiLayerRef.current.clearLayers();
+    if (!showPoiMarkers) return;
+
+    filteredMapPois.forEach((poi) => {
+      const selected = Boolean(selectedPoiMap[buildPoiKey(poi)]);
+      const marker = window.L.marker([poi.lat, poi.lon], { icon: createPoiMapIcon(window.L, poi) }).addTo(externalPoiLayerRef.current);
+      const popupLines = [
+        `<strong>${poi.name}</strong>`,
+        `<div>${getCategoryMeta(poi).label}</div>`,
+        poi.city ? `<div>${poi.city}</div>` : '',
+        poi.address ? `<div>${poi.address}</div>` : '',
+        poi.description ? `<div style="margin-top:6px;max-width:220px;">${String(poi.description).slice(0, 220)}</div>` : '',
+        poi.is_trip_poi ? '<div style="margin-top:6px;font-weight:600;">Im aktuellen Trip</div>' : '',
+      ].filter(Boolean).join('');
+      marker.bindPopup(popupLines);
+      marker.on('click', () => {
+        setActivePoi(poi);
+        setSelection({
+          selection_type: 'activity',
+          message_id: latestRenderable?.message?.id,
+          label: poi.name,
+          name: poi.name,
+          coords: [poi.lat, poi.lon],
+        });
+      });
+      if (marker.getElement()) {
+        if (selected) marker.getElement().style.filter = 'drop-shadow(0 0 0.5rem rgba(16,185,129,0.55))';
+        if (poi.is_trip_poi) marker.getElement().style.transform = 'scale(1.08)';
+      }
+    });
+  }, [isMapReady, filteredMapPois, selectedPoiMap, showPoiMarkers, latestRenderable]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1385,8 +1585,9 @@ export default function App() {
     const allPoints = [...routesToDraw.flatMap((r) => r.points), ...markers.map((m) => m.pos)];
     if (allPoints.length) {
       mapInstanceRef.current.fitBounds(window.L.latLngBounds(allPoints), { padding: [50, 50] });
+      setTimeout(() => { fetchVisiblePois(); }, 400);
     }
-  }, [latestRenderable, activeDay, isMapReady, selection]);
+  }, [latestRenderable, activeDay, isMapReady, selection, fetchVisiblePois]);
 
   const clearSelection = () => {
     setSelection(null);
@@ -1395,21 +1596,86 @@ export default function App() {
   };
 
 
-  const togglePoiSelection = (messageId, poi, parsedData) => {
-    setSelectedPoisByMessage((prev) => {
-      const current = prev[messageId] || [];
-      const exists = current.some((item) => item.name === poi.name);
-      const nextItems = exists ? current.filter((item) => item.name !== poi.name) : [...current, { ...poi, source_location: parsedData?.location }];
-      return { ...prev, [messageId]: nextItems };
+  const togglePoiSelection = (poi, parsedData = null) => {
+    const key = buildPoiKey(poi);
+    setSelectedPoiMap((prev) => {
+      const next = { ...prev };
+      if (next[key]) {
+        delete next[key];
+      } else {
+        next[key] = { ...poi, source_location: parsedData?.location || poi.source_location || poi.city || null };
+      }
+      return next;
     });
   };
 
-  const startTripPlanningFromPois = (messageId, parsedData) => {
-    const selectedPois = selectedPoisByMessage[messageId] || [];
+  const addPoiToTrip = async (poi) => {
+    try {
+      const selectionPayload = selection ? { ...selection } : null;
+      const inferredDayIndex = Number.isInteger(selectionPayload?.day_index)
+        ? selectionPayload.day_index
+        : Number.isInteger(activeDay)
+          ? activeDay
+          : null;
+      const inferredAfterStepIndex = selectionPayload?.selection_type === 'activity' && Number.isInteger(selectionPayload?.step_index)
+        ? selectionPayload.step_index
+        : null;
+
+      const response = await fetch(`${getBackendBaseUrl()}/api/trip/add_poi`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sessionId,
+          poi,
+          day_index: inferredDayIndex,
+          after_step_index: inferredAfterStepIndex,
+          selection: selectionPayload,
+        }),
+      });
+      const result = await response.json();
+      if (!response.ok || !['success', 'partial_success'].includes(result?.status)) {
+        throw new Error(result?.message || 'POI konnte nicht übernommen werden.');
+      }
+
+      setSelectedPoiMap((prev) => ({
+        ...prev,
+        [buildPoiKey(poi)]: { ...poi, source_location: poi.source_location || poi.city || null },
+      }));
+
+      const nextMessages = [{
+        id: `${Date.now()}-${Math.random()}`,
+        sender: 'ai',
+        text: result?.trip
+          ? `${poi.name} wurde direkt in den bestehenden Trip integriert.`
+          : `${poi.name} wurde zur aktuellen Reiseauswahl hinzugefügt.`,
+      }];
+
+      if (result?.trip) {
+        nextMessages.push({
+          id: `${Date.now()}-${Math.random()}`,
+          sender: 'ai',
+          text: JSON.stringify(result.trip),
+        });
+      }
+
+      if (result?.selection) {
+        setSelection(result.selection);
+        if (typeof result.selection?.day_index === 'number') {
+          setActiveDay(result.selection.day_index);
+        }
+      }
+
+      setMessages((prev) => [...prev, ...nextMessages]);
+    } catch (error) {
+      setMessages((prev) => [...prev, { id: `${Date.now()}-${Math.random()}`, sender: 'ai', text: JSON.stringify({ type: 'error', message: error.message || 'POI konnte nicht hinzugefügt werden.' }) }]);
+    }
+  };
+
+  const startTripPlanningFromPois = (_messageId, parsedData) => {
     if (!selectedPois.length) return;
 
     const poiNames = selectedPois.map((poi) => poi.name).join(', ');
-    const location = parsedData?.location || selectedPois[0]?.source_location || 'dem Zielort';
+    const location = parsedData?.location || selectedPois[0]?.source_location || 'dem Kartenausschnitt';
     const intentText = `Plane eine Reise mit diesen ausgewählten POIs in ${location}: ${poiNames}`;
 
     setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text: intentText }]);
@@ -1469,7 +1735,7 @@ export default function App() {
       session_id: sessionId,
       text: userText,
       selection: shouldSendSelectionContext ? enrichedSelection : null,
-      selected_pois: Object.values(selectedPoisByMessage).flat(),
+      selected_pois: selectedPois,
       edit_operation: effectiveOperation,
       drag_override: shouldSendSelectionContext ? dragOverride : null,
       current_trip: shouldSendSelectionContext ? (latestRenderable?.data || null) : null,
@@ -1504,7 +1770,7 @@ export default function App() {
               key={msg.id}
               msg={msg}
               selection={selection}
-              selectedPois={selectedPoisByMessage}
+              selectedPois={selectedPois}
               onTogglePoiSelection={togglePoiSelection}
               onStartTripPlanningFromPois={startTripPlanningFromPois}
               onSelect={(next) => { setSelection(next); setDragOverride(null); setPendingOperation(null); }}
@@ -1548,6 +1814,57 @@ export default function App() {
             <Menu className="text-slate-600" />
           </button>
         )}
+
+        <div className="absolute right-8 top-6 z-[1000] flex flex-col gap-3">
+          <div className="rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-xl backdrop-blur-md">
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                <input type="checkbox" checked={showPoiMarkers} onChange={(e) => setShowPoiMarkers(e.target.checked)} />
+                POI-Marker anzeigen
+              </label>
+              <select
+                value={poiCategoryFilter}
+                onChange={(e) => setPoiCategoryFilter(e.target.value)}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              >
+                {availablePoiCategories.map((category) => (
+                  <option key={category} value={category}>{category}</option>
+                ))}
+              </select>
+              <select
+                value={poiTripFilter}
+                onChange={(e) => setPoiTripFilter(e.target.value)}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
+              >
+                <option value="all">Alle</option>
+                <option value="trip_only">Im Trip</option>
+                <option value="non_trip">Nicht im Trip</option>
+                <option value="selected">Ausgewählt</option>
+              </select>
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              {showPoiMarkers ? `${filteredMapPois.length} von ${mapPois.length} POIs im sichtbaren Kartenausschnitt` : 'POI-Layer ist ausgeblendet'}
+            </div>
+            {poiFetchError && <div className="mt-2 text-xs text-rose-600">{poiFetchError}</div>}
+            {!!selectedPois.length && (
+              <button
+                type="button"
+                onClick={() => startTripPlanningFromPois(null, null)}
+                className="mt-3 rounded-xl bg-slate-800 px-3 py-2 text-xs font-bold text-white hover:bg-slate-700"
+              >
+                Mit {selectedPois.length} ausgewählten POIs planen
+              </button>
+            )}
+          </div>
+        </div>
+
+        <MapPoiDetailsPanel
+          poi={activePoi}
+          isSelected={Boolean(activePoi && selectedPoiMap[buildPoiKey(activePoi)])}
+          onToggleSelection={() => activePoi && togglePoiSelection(activePoi)}
+          onAddToTrip={() => activePoi && addPoiToTrip(activePoi)}
+          onClose={() => setActivePoi(null)}
+        />
 
         {totalDays > 1 && (
           <div className="absolute top-8 left-1/2 -translate-x-1/2 z-[1000] bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-xl border border-slate-200/50 flex gap-1">

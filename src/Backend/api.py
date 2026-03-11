@@ -4,10 +4,12 @@ import os
 import re
 import sys
 import uuid
+from datetime import date, timedelta
 from typing import Any, Dict, Optional, Tuple, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from opensearchpy import OpenSearch, RequestsHttpConnection
 
@@ -53,6 +55,582 @@ os_client = OpenSearch(
 )
 
 SESSION_STATE: Dict[str, Dict[str, Any]] = {}
+
+
+
+POI_INDEX = os.getenv("POI_INDEX", "tourism-data-v7")
+POI_MAP_INDEX = os.getenv("POI_MAP_INDEX", "poi-data")
+
+
+class PoiSearchRequest(BaseModel):
+    north: float
+    south: float
+    east: float
+    west: float
+    limit: int = Field(default=300, ge=1, le=500)
+    category: Optional[str] = None
+    exclude_names: List[str] = Field(default_factory=list)
+    include_names: List[str] = Field(default_factory=list)
+    trip_mode: str = Field(default="all")
+
+
+class AddPoiRequest(BaseModel):
+    session_id: Optional[str] = None
+    poi: Dict[str, Any]
+    day_index: Optional[int] = None
+    after_step_index: Optional[int] = None
+    selection: Optional[Dict[str, Any]] = None
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _parse_lat_lon_string(value: Any) -> Tuple[Optional[float], Optional[float]]:
+    if not isinstance(value, str) or "," not in value:
+        return None, None
+    first, second = value.split(",", 1)
+    lat = _safe_float(first.strip())
+    lon = _safe_float(second.strip())
+    if lat is None or lon is None:
+        return None, None
+    return lat, lon
+
+
+def _get_hit_source(hit: Dict[str, Any]) -> Dict[str, Any]:
+    return hit.get("_source") or {}
+
+
+def _get_metadata_dict(source: Dict[str, Any]) -> Dict[str, Any]:
+    metadata = source.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    metadata_dict = source.get("metadata_dict")
+    if isinstance(metadata_dict, dict):
+        return metadata_dict
+    return {}
+
+
+def _extract_hit_coords(source: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+    location = source.get("location")
+    if isinstance(location, dict):
+        lat = _safe_float(location.get("lat") or location.get("latitude"))
+        lon = _safe_float(location.get("lon") or location.get("longitude"))
+        if lat is not None and lon is not None:
+            return lat, lon
+    if isinstance(location, list) and len(location) >= 2:
+        lon = _safe_float(location[0])
+        lat = _safe_float(location[1])
+        if lat is not None and lon is not None:
+            return lat, lon
+    lat, lon = _parse_lat_lon_string(location)
+    if lat is not None and lon is not None:
+        return lat, lon
+
+    metadata = _get_metadata_dict(source)
+    metadata_location = metadata.get("location")
+    lat, lon = _parse_lat_lon_string(metadata_location)
+    if lat is not None and lon is not None:
+        return lat, lon
+    if isinstance(metadata_location, dict):
+        lat = _safe_float(metadata_location.get("lat") or metadata_location.get("latitude"))
+        lon = _safe_float(metadata_location.get("lon") or metadata_location.get("longitude"))
+        if lat is not None and lon is not None:
+            return lat, lon
+
+    geo = source.get("geo")
+    if isinstance(geo, dict):
+        lat = _safe_float(geo.get("latitude") or geo.get("lat"))
+        lon = _safe_float(geo.get("longitude") or geo.get("lon"))
+        if lat is not None and lon is not None:
+            return lat, lon
+
+    lat = _safe_float(source.get("lat") or source.get("latitude"))
+    lon = _safe_float(source.get("lon") or source.get("longitude"))
+    if lat is not None and lon is not None:
+        return lat, lon
+
+    return None, None
+
+
+def _coalesce(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_poi_hit(hit: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    source = _get_hit_source(hit)
+    metadata = _get_metadata_dict(source)
+    lat, lon = _extract_hit_coords(source)
+    if lat is None or lon is None:
+        return None
+
+    name = _coalesce(source.get("name"), metadata.get("name"), source.get("title"), metadata.get("title"), "Unbekannt")
+    category = _coalesce(
+        source.get("category"),
+        source.get("type"),
+        metadata.get("type"),
+        source.get("subcategory"),
+        "Ort",
+    )
+    description = _coalesce(source.get("description"), source.get("text"), metadata.get("description"))
+    city = _coalesce(source.get("city"), metadata.get("city"))
+    street = _coalesce(source.get("street"), metadata.get("street"))
+    postal_code = _coalesce(source.get("postal_code"), metadata.get("postal_code"))
+    country = _coalesce(source.get("country"), metadata.get("country"))
+    address = _coalesce(source.get("address"))
+    if not address:
+        address_parts = [street, postal_code, city, country]
+        address = ", ".join([str(part).strip() for part in address_parts if part and str(part).strip()]) or None
+
+    poi_id = _coalesce(
+        hit.get("_id"),
+        source.get("source_id"),
+        metadata.get("source_id"),
+        source.get("@id"),
+        metadata.get("@id"),
+        name,
+    )
+
+    return {
+        "id": poi_id,
+        "name": str(name),
+        "category": str(category),
+        "description": str(description).strip() if description else None,
+        "lat": lat,
+        "lon": lon,
+        "city": city,
+        "address": address,
+        "website": _coalesce(source.get("website"), source.get("url"), metadata.get("website")),
+        "telephone": _coalesce(source.get("telephone"), metadata.get("telephone")),
+        "opening_hours": _coalesce(
+            source.get("openingHoursSpecification"),
+            source.get("opening_hours"),
+            metadata.get("openingHoursSpecification"),
+        ),
+        "start_date": _coalesce(source.get("startDate"), source.get("start_date"), metadata.get("startDate")),
+        "end_date": _coalesce(source.get("endDate"), source.get("end_date"), metadata.get("endDate")),
+        "source": _coalesce(source.get("source"), metadata.get("source")),
+    }
+
+
+def _index_exists(index_name: str) -> bool:
+    try:
+        return bool(index_name) and bool(os_client.indices.exists(index=index_name))
+    except Exception:
+        return False
+
+
+def _candidate_poi_indices() -> List[str]:
+    candidates = [
+        POI_MAP_INDEX,
+        POI_INDEX,
+        "poi-data",
+        "tourism-data-v7",
+    ]
+    ordered: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        name = str(candidate or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        if _index_exists(name):
+            ordered.append(name)
+    return ordered
+
+
+def _build_poi_query(req: PoiSearchRequest, geo_field: str = "location") -> Dict[str, Any]:
+    center_lat = (req.north + req.south) / 2.0
+    center_lon = (req.east + req.west) / 2.0
+    filter_clauses: List[Dict[str, Any]] = [
+        {
+            "geo_bounding_box": {
+                geo_field: {
+                    "top_left": {"lat": req.north, "lon": req.west},
+                    "bottom_right": {"lat": req.south, "lon": req.east},
+                }
+            }
+        }
+    ]
+
+    if req.category and req.category != "Alle":
+        filter_clauses.append({
+            "bool": {
+                "should": [
+                    {"term": {"type": req.category}},
+                    {"term": {"category": req.category}},
+                    {"term": {"metadata.type.keyword": req.category}},
+                    {"match_phrase": {"type": req.category}},
+                    {"match_phrase": {"category": req.category}},
+                    {"match_phrase": {"metadata.type": req.category}},
+                    {"match": {"description": req.category}},
+                ],
+                "minimum_should_match": 1,
+            }
+        })
+
+    return {
+        "size": req.limit,
+        "_source": True,
+        "sort": [
+            {
+                "_geo_distance": {
+                    geo_field: {"lat": center_lat, "lon": center_lon},
+                    "order": "asc",
+                    "unit": "km",
+                    "ignore_unmapped": True,
+                }
+            }
+        ],
+        "query": {"bool": {"filter": filter_clauses}},
+    }
+
+
+def _apply_trip_filters(req: PoiSearchRequest, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    exclude = {str(x).strip().lower() for x in (req.exclude_names or []) if str(x).strip()}
+    include = {str(x).strip().lower() for x in (req.include_names or []) if str(x).strip()}
+    trip_mode = str(req.trip_mode or "all").strip().lower()
+
+    seen = set()
+    pois: List[Dict[str, Any]] = []
+    for hit in hits:
+        poi = _normalize_poi_hit(hit)
+        if not poi:
+            continue
+
+        poi_name = str(poi.get("name") or "").strip().lower()
+        is_trip_poi = bool(poi_name and poi_name in include)
+
+        if poi_name and poi_name in exclude:
+            continue
+        if trip_mode == "trip_only" and not is_trip_poi:
+            continue
+        if trip_mode == "non_trip" and is_trip_poi:
+            continue
+
+        key = (poi_name, round(float(poi.get("lat")), 6), round(float(poi.get("lon")), 6))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        poi["is_trip_poi"] = is_trip_poi
+        pois.append(poi)
+
+    return pois
+
+
+def _search_pois_in_bbox(req: PoiSearchRequest) -> Tuple[List[Dict[str, Any]], List[str]]:
+    last_error: Optional[Exception] = None
+    used_indices: List[str] = []
+    candidate_indices = _candidate_poi_indices()
+    if not candidate_indices:
+        return [], used_indices
+
+    for index_name in candidate_indices:
+        try:
+            res = os_client.search(index=index_name, body=_build_poi_query(req, "location"))
+            hits = (res.get("hits") or {}).get("hits", [])
+            used_indices.append(index_name)
+            pois = _apply_trip_filters(req, hits)
+            if pois or index_name == candidate_indices[-1]:
+                return pois, used_indices
+        except Exception as exc:
+            last_error = exc
+            continue
+
+    if last_error:
+        raise last_error
+    return [], used_indices
+
+
+
+
+@app.post("/api/pois/search")
+async def search_pois(req: PoiSearchRequest):
+    try:
+        pois, used_indices = _search_pois_in_bbox(req)
+        return {
+            "pois": pois,
+            "index": used_indices[0] if used_indices else POI_MAP_INDEX,
+            "used_indices": used_indices,
+            "configured_candidates": _candidate_poi_indices(),
+        }
+    except Exception as exc:
+        return {
+            "pois": [],
+            "error": str(exc),
+            "index": POI_MAP_INDEX,
+            "used_indices": [],
+            "configured_candidates": _candidate_poi_indices(),
+        }
+
+
+def _build_activity_data_from_poi(poi: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": poi.get("name"),
+        "category": poi.get("category") or poi.get("type") or "POI",
+        "description": poi.get("description") or poi.get("snippet") or "",
+        "lat": _safe_float(poi.get("lat")),
+        "lon": _safe_float(poi.get("lon")),
+        "location": poi.get("city") or poi.get("source_location") or poi.get("address") or poi.get("location"),
+        "city": poi.get("city") or poi.get("source_location"),
+        "address": poi.get("address"),
+        "website": poi.get("website"),
+        "telephone": poi.get("telephone"),
+        "opening_hours": poi.get("opening_hours") or poi.get("openingHoursSpecification"),
+        "openingHoursSpecification": poi.get("openingHoursSpecification") or poi.get("opening_hours"),
+        "duration_minutes": estimate_activity_duration_minutes(poi),
+        "added_from_map": True,
+        "source_id": poi.get("source_id"),
+    }
+
+
+def _extract_trip_endpoints(trip_obj: Dict[str, Any]) -> Tuple[Optional[str], Optional[str], Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
+    legs = list((trip_obj or {}).get("legs") or [])
+    if not legs:
+        return None, None, None, None
+    first_leg = legs[0] or {}
+    last_leg = legs[-1] or {}
+    start_name = trip_obj.get("start") or first_leg.get("from")
+    end_name = trip_obj.get("end") or last_leg.get("to")
+    start_coords = tuple(first_leg.get("from_coords")[:2]) if _valid_coords(first_leg.get("from_coords")) else None
+    end_coords = tuple(last_leg.get("to_coords")[:2]) if _valid_coords(last_leg.get("to_coords")) else None
+    return start_name, end_name, start_coords, end_coords
+
+
+def _reroute_between_points(
+    *,
+    start_name: Optional[str],
+    end_name: Optional[str],
+    start_coords: Optional[Tuple[float, float]],
+    end_coords: Optional[Tuple[float, float]],
+    time_str: str,
+    route_preferences: Dict[str, Any],
+    selection: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    routed = parse_json_result(
+        plan_journey_logic(
+            start=start_name,
+            end=end_name,
+            time_str=time_str,
+            start_coords_override=start_coords,
+            end_coords_override=end_coords,
+            route_preferences=route_preferences,
+            selection=selection,
+        )
+    )
+    if isinstance(routed, dict) and routed.get("legs"):
+        recalc_trip_total_duration(routed)
+        apply_query_preferences(routed, route_preferences)
+    return routed
+
+
+def _pick_target_day_and_anchor(current_trip: Dict[str, Any], selection: Optional[Dict[str, Any]], explicit_day_index: Optional[int], explicit_after_step_index: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+    if current_trip.get("type") != "multi_step_plan":
+        return None, None
+
+    steps = current_trip.get("steps", []) or []
+    day_index = explicit_day_index
+    anchor_step_index = explicit_after_step_index
+
+    if isinstance(anchor_step_index, int):
+        if not isinstance(day_index, int) and isinstance(selection, dict) and isinstance(selection.get("day_index"), int):
+            day_index = selection.get("day_index")
+        return day_index, anchor_step_index
+
+    if isinstance(selection, dict):
+        if not isinstance(day_index, int) and isinstance(selection.get("day_index"), int):
+            day_index = selection.get("day_index")
+        if selection.get("selection_type") == "activity" and isinstance(selection.get("step_index"), int):
+            return day_index, selection.get("step_index")
+
+    if not isinstance(day_index, int):
+        day_index = 1
+
+    day_step_indices = get_day_step_indices(current_trip, day_index)
+    activity_indices = [idx for idx in day_step_indices if steps[idx].get("type") == "activity"]
+    if not activity_indices:
+        return day_index, None
+
+    # Default: append near end of day by anchoring after the last activity.
+    return day_index, activity_indices[-1]
+
+
+def insert_poi_into_multiday_plan(
+    current_trip: Dict[str, Any],
+    poi: Dict[str, Any],
+    *,
+    selection: Optional[Dict[str, Any]],
+    day_index: Optional[int],
+    after_step_index: Optional[int],
+    route_preferences: Dict[str, Any],
+) -> Dict[str, Any]:
+    if current_trip.get("type") != "multi_step_plan":
+        return {"type": "error", "message": "Gezieltes POI-Einfügen wird nur für Mehrtagespläne unterstützt."}
+
+    updated = copy.deepcopy(current_trip)
+    steps = updated.get("steps", []) or []
+    target_day, anchor_idx = _pick_target_day_and_anchor(updated, selection, day_index, after_step_index)
+    if not isinstance(target_day, int):
+        return {"type": "error", "message": "Kein Zieltag für das Hinzufügen des POI gefunden."}
+
+    activity_data = _build_activity_data_from_poi(poi)
+    if activity_data.get("lat") is None or activity_data.get("lon") is None:
+        return {"type": "error", "message": "Der ausgewählte POI hat keine gültigen Koordinaten."}
+
+    day_indices = get_day_step_indices(updated, target_day)
+    if not day_indices:
+        return {"type": "error", "message": f"Tag {target_day} konnte im aktuellen Trip nicht gefunden werden."}
+
+    if anchor_idx is None:
+        return {"type": "error", "message": f"Für Tag {target_day} gibt es noch keine Aktivität, an die der POI angefügt werden kann."}
+    if anchor_idx not in day_indices or steps[anchor_idx].get("type") != "activity":
+        return {"type": "error", "message": "Die Einfügeposition ist ungültig oder verweist nicht auf eine Aktivität."}
+
+    anchor_activity = steps[anchor_idx].get("data", {}) or {}
+    anchor_coords = _resolve_activity_coords(anchor_activity, selection)
+    if anchor_coords is None:
+        return {"type": "error", "message": "Die Anker-Aktivität hat keine Koordinaten für das Routing."}
+
+    next_trip_idx = next((i for i in range(anchor_idx + 1, len(steps)) if i in day_indices and steps[i].get("type") == "trip"), None)
+    if next_trip_idx is None:
+        return {"type": "error", "message": "Hinter der ausgewählten Aktivität wurde keine anschließende Teilstrecke gefunden."}
+
+    old_next_trip = steps[next_trip_idx].get("data", {}) or {}
+    old_departure = extract_trip_start_time(old_next_trip, "07:30")
+
+    outbound_trip = _reroute_between_points(
+        start_name=anchor_activity.get("name") or old_next_trip.get("start") or old_next_trip.get("legs", [{}])[0].get("from"),
+        end_name=activity_data.get("name"),
+        start_coords=anchor_coords,
+        end_coords=(activity_data["lat"], activity_data["lon"]),
+        time_str=build_tomorrow_time_str(old_departure, old_departure),
+        route_preferences=route_preferences,
+        selection=selection,
+    )
+    if "legs" not in outbound_trip:
+        return outbound_trip
+
+    onward_start_name, onward_end_name, _onward_start_coords, onward_end_coords = _extract_trip_endpoints(old_next_trip)
+    arrival_time = extract_trip_end_time(outbound_trip) or old_departure
+    next_departure = shift_clock_time(arrival_time, estimate_activity_duration_minutes(activity_data)) or arrival_time
+    onward_trip = _reroute_between_points(
+        start_name=activity_data.get("name"),
+        end_name=onward_end_name,
+        start_coords=(activity_data["lat"], activity_data["lon"]),
+        end_coords=onward_end_coords,
+        time_str=build_tomorrow_time_str(next_departure, next_departure),
+        route_preferences=route_preferences,
+        selection=selection,
+    )
+    if "legs" not in onward_trip:
+        return onward_trip
+
+    activity_step = {"type": "activity", "data": activity_data}
+    outbound_step = {"type": "trip", "data": outbound_trip}
+    onward_step = {"type": "trip", "data": onward_trip}
+
+    updated_steps = list(steps[:next_trip_idx]) + [outbound_step, activity_step, onward_step] + list(steps[next_trip_idx + 1:])
+    updated["steps"] = updated_steps
+    updated["query_preferences"] = dict(updated.get("query_preferences") or {}) | route_preferences
+    updated["selection"] = {
+        "selection_type": "activity",
+        "day_index": target_day,
+        "step_index": next_trip_idx + 1,
+        "label": activity_data.get("name"),
+        "name": activity_data.get("name"),
+        "coords": [activity_data.get("lat"), activity_data.get("lon")],
+    }
+    return updated
+
+
+@app.post("/api/trip/add_poi")
+async def add_poi_to_trip(req: AddPoiRequest):
+    session_state = get_session_state(req.session_id)
+    request_state = ensure_request_state(session_state)
+    poi = dict(req.poi or {})
+    name = _clean_value(poi.get("name"))
+    lat = _safe_float(poi.get("lat"))
+    lon = _safe_float(poi.get("lon"))
+    if not name or lat is None or lon is None:
+        return {"status": "error", "message": "POI braucht mindestens name, lat und lon."}
+
+    poi["name"] = name
+    poi["lat"] = lat
+    poi["lon"] = lon
+
+    existing = list(request_state.get("selected_pois") or [])
+    if not any(isinstance(item, dict) and item.get("name") == name and _safe_float(item.get("lat")) == lat and _safe_float(item.get("lon")) == lon for item in existing):
+        existing.append(poi)
+    request_state["selected_pois"] = existing
+    session_state["request_state"] = request_state
+
+    effective_selection = req.selection or session_state.get("selection")
+    current_trip = session_state.get("current_trip")
+    route_preferences = request_state.get("route_preferences") or session_state.get("route_preferences") or {}
+
+    trip = None
+    if isinstance(current_trip, dict) and current_trip.get("type") == "multi_step_plan":
+        inserted = insert_poi_into_multiday_plan(
+            current_trip,
+            poi,
+            selection=effective_selection,
+            day_index=req.day_index,
+            after_step_index=req.after_step_index,
+            route_preferences=route_preferences,
+        )
+        if inserted.get("type") == "error" or inserted.get("error"):
+            return {
+                "status": "partial_success",
+                "message": f"POI gespeichert, aber gezieltes Einfügen fehlgeschlagen: {inserted.get('message') or inserted.get('error')}",
+                "selected_pois": existing,
+                "trip": None,
+            }
+        trip = inserted
+        session_state["current_trip"] = trip
+        session_state["selection"] = trip.get("selection") or effective_selection
+        request_state["fulfilled"] = True
+        session_state["request_state"] = request_state
+    elif not get_missing_request_fields(request_state):
+        try:
+            result_str = execute_request_state(request_state, {
+                "session_id": req.session_id,
+                "selected_pois": existing,
+                "current_trip": current_trip,
+                "route_preferences": route_preferences,
+                "selection": effective_selection,
+            })
+            trip = parse_json_result(result_str)
+            update_session_from_result(session_state, result_str, effective_selection)
+            request_state["fulfilled"] = True
+            session_state["request_state"] = request_state
+        except Exception as exc:
+            return {"status": "partial_success", "message": f"POI übernommen, aber Trip-Replanning fehlgeschlagen: {exc}", "selected_pois": existing}
+
+    return {
+        "status": "success",
+        "selected_pois": existing,
+        "trip": trip,
+        "selection": session_state.get("selection"),
+        "request_state": {
+            "trip_type": request_state.get("trip_type"),
+            "start": request_state.get("start"),
+            "end": request_state.get("end"),
+            "base_location": request_state.get("base_location"),
+            "selected_pois": [item.get("name") for item in existing if isinstance(item, dict) and item.get("name")],
+        },
+    }
 
 
 def get_session_state(session_id: Optional[str]) -> Dict[str, Any]:
@@ -284,9 +862,13 @@ def normalize_ws_payload(raw_text: str) -> Dict[str, Any]:
 # ----------------------
 
 REQUEST_FIELD_LABELS: Dict[str, str] = {
+    "trip_type": "Anfragetyp",
     "start": "Startort",
     "end": "Zielort",
     "base_location": "Basisort",
+    "origin": "Abfahrtsort",
+    "travel_window": "Zeitfenster",
+    "transport_mode": "Verkehrsmittel",
     "days": "Anzahl der Tage",
     "date": "Datum",
     "interest": "Interessen",
@@ -332,6 +914,9 @@ def build_empty_request_state() -> Dict[str, Any]:
         "start": None,
         "end": None,
         "base_location": None,
+        "origin": None,
+        "travel_window": None,
+        "transport_mode": None,
         "roundtrip_base": False,
         "days": None,
         "date": None,
@@ -353,6 +938,7 @@ def build_empty_request_state() -> Dict[str, Any]:
         "selected_pois": [],
         "fulfilled": False,
     }
+
 
 
 OPTIONAL_DECLINE_PATTERNS = [
@@ -482,12 +1068,14 @@ def _extract_date_phrase(text: str) -> Optional[str]:
     keywords = [
         "today", "tomorrow", "tonight", "this weekend", "next weekend", "next week",
         "heute", "morgen", "übermorgen", "uebermorgen", "dieses wochenende", "nächstes wochenende", "naechstes wochenende", "nächste woche", "naechste woche",
+        "montag", "dienstag", "mittwoch", "donnerstag", "freitag", "samstag", "sonntag",
+        "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
     ]
     lower = text.lower()
     for keyword in keywords:
         if keyword in lower:
             return keyword
-    explicit = re.search(r"\b(\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\b", text)
+    explicit = re.search(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)\b", text)
     if explicit:
         return explicit.group(1)
     return None
@@ -615,7 +1203,172 @@ def merge_request_state(existing: Dict[str, Any], updates: Dict[str, Any], raw_t
     return merged
 
 
-def extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+PARSER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "parse_travel_request",
+        "description": "Extrahiert strukturierte Reisewünsche oder die Antwort auf eine offene Rückfrage.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "answer_field": {"type": "string"},
+                "trip_type": {"type": "string"},
+                "start": {"type": "string"},
+                "end": {"type": "string"},
+                "base_location": {"type": "string"},
+                "origin": {"type": "string"},
+                "travel_window": {"type": "string"},
+                "days": {"type": "integer"},
+                "date": {"type": "string"},
+                "time_str": {"type": "string"},
+                "interest": {"type": "string"},
+                "pace": {"type": "string"},
+                "activities_per_day": {"type": "integer"},
+                "transport_mode": {"type": "string"}
+            }
+        }
+    }
+}
+
+
+def _normalize_transport_mode(value: Optional[str]) -> Optional[str]:
+    lower = (value or "").strip().lower()
+    if not lower:
+        return None
+    if any(token in lower for token in ["zug", "train", "bahn", "bus", "öpnv", "oepnv", "transit", "public"]):
+        return "TRANSIT"
+    if any(token in lower for token in ["auto", "car", "pkw"]):
+        return "CAR"
+    if any(token in lower for token in ["bike", "fahrrad", "rad"]):
+        return "BICYCLE"
+    if any(token in lower for token in ["walk", "zu fuß", "zu fuss", "laufen", "fuß", "fuss"]):
+        return "WALK"
+    return None
+
+
+def _apply_transport_mode_to_route_preferences(mode: Optional[str], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    prefs = dict(current or {})
+    normalized = _normalize_transport_mode(mode)
+    if normalized == "TRANSIT":
+        prefs.update({"primary_mode": "TRANSIT", "allowed_modes": ["TRANSIT"]})
+    elif normalized == "CAR":
+        prefs.update({"primary_mode": "CAR", "allowed_modes": ["CAR"]})
+    elif normalized == "BICYCLE":
+        prefs.update({"primary_mode": "BICYCLE", "allowed_modes": ["BICYCLE"]})
+    elif normalized == "WALK":
+        prefs.update({"primary_mode": "WALK", "allowed_modes": ["WALK"]})
+    return prefs
+
+
+def _resolve_relative_date_phrase(text: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    value = _clean_value(text)
+    if not value:
+        return None, None
+    lower = value.lower()
+    today = date.today()
+    weekdays = {
+        "montag": 0, "monday": 0, "dienstag": 1, "tuesday": 1, "mittwoch": 2, "wednesday": 2,
+        "donnerstag": 3, "thursday": 3, "freitag": 4, "friday": 4, "samstag": 5, "saturday": 5,
+        "sonntag": 6, "sunday": 6,
+    }
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value, None
+    m = re.fullmatch(r"(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?", value)
+    if m:
+        day, month, year = int(m.group(1)), int(m.group(2)), m.group(3)
+        year_val = today.year if year is None else int(year)
+        if year_val < 100:
+            year_val += 2000
+        try:
+            return date(year_val, month, day).isoformat(), None
+        except Exception:
+            return value, None
+    if lower in {"heute", "today"}:
+        return today.isoformat(), None
+    if lower in {"morgen", "tomorrow"}:
+        return (today + timedelta(days=1)).isoformat(), None
+    if lower in {"übermorgen", "uebermorgen"}:
+        return (today + timedelta(days=2)).isoformat(), None
+    if lower in {"dieses wochenende", "this weekend"}:
+        saturday = today + timedelta((5 - today.weekday()) % 7)
+        return None, f"{saturday.isoformat()} bis {(saturday + timedelta(days=1)).isoformat()}"
+    if lower in {"nächstes wochenende", "naechstes wochenende", "next weekend"}:
+        saturday = today + timedelta(((5 - today.weekday()) % 7) + 7)
+        return None, f"{saturday.isoformat()} bis {(saturday + timedelta(days=1)).isoformat()}"
+    if lower in {"nächste woche", "naechste woche", "next week"}:
+        monday = today + timedelta((7 - today.weekday()) % 7 or 7)
+        return None, f"{monday.isoformat()} bis {(monday + timedelta(days=6)).isoformat()}"
+    for name, weekday in weekdays.items():
+        if lower == name:
+            delta = (weekday - today.weekday()) % 7 or 7
+            return (today + timedelta(days=delta)).isoformat(), None
+    return None, value
+
+
+def _sanitize_parser_updates(raw: Dict[str, Any], current_state: Dict[str, Any]) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {}
+    answer_field = _clean_value(raw.get("answer_field"))
+    if answer_field in REQUEST_FIELD_LABELS:
+        updates["answer_field"] = answer_field
+    trip_type = _normalize_trip_type(raw.get("trip_type"))
+    if trip_type:
+        updates["trip_type"] = trip_type
+    for key in ["start", "end", "base_location", "origin", "travel_window", "interest"]:
+        value = _clean_value(raw.get(key))
+        if value:
+            updates[key] = value
+    if isinstance(raw.get("days"), int) and raw.get("days") > 0:
+        updates["days"] = int(raw.get("days"))
+    if isinstance(raw.get("activities_per_day"), int) and raw.get("activities_per_day") > 0:
+        updates["activities_per_day"] = max(1, min(8, int(raw.get("activities_per_day"))))
+    pace = _extract_pace(str(raw.get("pace") or ""))
+    if pace:
+        updates["pace"] = pace
+    transport_mode = _normalize_transport_mode(raw.get("transport_mode"))
+    if transport_mode:
+        updates["transport_mode"] = transport_mode
+        updates["route_preferences"] = _apply_transport_mode_to_route_preferences(transport_mode, current_state.get("route_preferences"))
+    date_value = _clean_value(raw.get("date"))
+    if date_value:
+        normalized, travel_window = _resolve_relative_date_phrase(date_value)
+        if normalized:
+            updates["date"] = normalized
+            updates["time_str"] = f"{normalized} 09:00"
+        elif travel_window:
+            updates["travel_window"] = travel_window
+    time_str = _clean_value(raw.get("time_str"))
+    if time_str:
+        updates["time_str"] = time_str
+    if updates.get("origin") and not updates.get("start") and not current_state.get("start"):
+        updates["start"] = updates["origin"]
+    if updates.get("base_location") and updates.get("trip_type") in {"base_explore", "local_search"}:
+        updates["roundtrip_base"] = True
+        updates.setdefault("start", updates["base_location"])
+        updates.setdefault("end", updates["base_location"])
+    return updates
+
+
+def llm_extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+    snapshot = {k: current_state.get(k) for k in ["trip_type", "start", "end", "base_location", "origin", "travel_window", "days", "date", "interest", "pace", "activities_per_day", "transport_mode", "pending_question_field"]}
+    response = client.chat.completions.create(
+        model=DEPLOYMENT_NAME,
+        messages=[
+            {"role": "system", "content": "Du extrahierst strukturierte Reisewünsche aus Freitext. Wenn der Nutzer auf eine Rückfrage antwortet, gib das passende Zielfeld in answer_field an. Trip-Typ nur setzen, wenn die neue Nachricht ihn wirklich festlegt. Relative Zeitangaben wenn möglich als date, sonst als travel_window."},
+            {"role": "user", "content": json.dumps({"user_text": text, "current_state": snapshot}, ensure_ascii=False)},
+        ],
+        tools=[PARSER_TOOL],
+        tool_choice={"type": "function", "function": {"name": "parse_travel_request"}},
+    )
+    tool_calls = getattr(response.choices[0].message, "tool_calls", None) or []
+    if not tool_calls:
+        return {}
+    args = json.loads(tool_calls[0].function.arguments or "{}")
+    if not isinstance(args, dict):
+        return {}
+    return _sanitize_parser_updates(args, current_state)
+
+
+def regex_extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
     cleaned = _clean_value(text) or ""
     updates: Dict[str, Any] = {}
     pending_field = current_state.get("pending_question_field")
@@ -637,7 +1390,7 @@ def extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[st
         if pending_field == "pace":
             updates["pace"] = _extract_pace(cleaned) or (cleaned.upper() if cleaned.upper() in {"EASY", "MEDIUM", "HEAVY"} else None)
             return updates
-        if pending_field in {"start", "end", "base_location", "date", "interest"} and cleaned:
+        if pending_field in {"start", "end", "base_location", "date", "interest", "transport_mode"} and cleaned:
             updates[pending_field] = cleaned
             if pending_field == "date":
                 updates["time_str"] = f"{cleaned} 09:00"
@@ -657,8 +1410,12 @@ def extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[st
 
     date_phrase = _extract_date_phrase(cleaned)
     if date_phrase:
-        updates["date"] = date_phrase
-        updates["time_str"] = f"{date_phrase} 09:00"
+        normalized_date, travel_window = _resolve_relative_date_phrase(date_phrase)
+        if normalized_date:
+            updates["date"] = normalized_date
+            updates["time_str"] = f"{normalized_date} 09:00"
+        elif travel_window:
+            updates["travel_window"] = travel_window
 
     days = _extract_days(cleaned)
     if days is not None:
@@ -676,6 +1433,11 @@ def extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[st
     if activities_per_day is not None:
         updates["activities_per_day"] = activities_per_day
 
+    transport_mode = _normalize_transport_mode(cleaned)
+    if transport_mode:
+        updates["transport_mode"] = transport_mode
+        updates["route_preferences"] = _apply_transport_mode_to_route_preferences(transport_mode, current_state.get("route_preferences"))
+
     request_type = infer_trip_type(cleaned, updates, current_state)
     if request_type:
         updates["trip_type"] = request_type
@@ -688,6 +1450,28 @@ def extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[st
                 updates["roundtrip_base"] = True
 
     return updates
+
+
+def extract_request_updates(text: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = _clean_value(text) or ""
+    if not cleaned:
+        return {}
+    pending_field = current_state.get("pending_question_field")
+    pending_optional = bool(current_state.get("pending_question_optional"))
+    if pending_field and pending_optional and _is_decline_answer(cleaned):
+        return {"skipped_optional_fields": [pending_field]}
+
+    try:
+        llm_updates = llm_extract_request_updates(cleaned, current_state)
+    except Exception:
+        llm_updates = {}
+    regex_updates = regex_extract_request_updates(cleaned, current_state)
+    merged = dict(regex_updates)
+    merged.update({k: v for k, v in llm_updates.items() if v is not None})
+    merged.pop("answer_field", None)
+    if pending_field and pending_field != "trip_type" and current_state.get("trip_type") and not merged.get("trip_type"):
+        merged["trip_type"] = current_state.get("trip_type")
+    return merged
 
 
 def _required_fields_for_trip_type(trip_type: Optional[str], state: Dict[str, Any]) -> List[str]:
@@ -713,11 +1497,11 @@ def _optional_fields_for_trip_type(trip_type: Optional[str], state: Dict[str, An
     if trip_type == "point_to_point":
         return ["date"]
     if trip_type == "multiday":
-        return ["interest", "pace", "activities_per_day", "date"]
+        return ["interest", "pace", "activities_per_day", "date", "transport_mode"]
     if trip_type in {"day_trip", "base_explore"}:
-        return ["pace", "activities_per_day", "date"]
+        return ["pace", "activities_per_day", "date", "transport_mode"]
     if trip_type == "local_search":
-        return ["pace", "activities_per_day", "date"]
+        return ["pace", "activities_per_day", "date", "transport_mode"]
     return []
 
 
@@ -766,6 +1550,8 @@ def build_clarification_question(state: Dict[str, Any], missing_fields: List[str
             return field, "Wie intensiv soll der Plan sein: EASY, MEDIUM oder HEAVY? Du kannst auch mit 'nein' ablehnen.", True
         if field == "activities_per_day":
             return field, "Wie viele Aktivitäten pro Tag möchtest du ungefähr? Du kannst auch mit 'nein' ablehnen.", True
+        if field == "transport_mode":
+            return field, "Mit welchem Verkehrsmittel möchtest du reisen: Auto, ÖPNV/Zug, Fahrrad oder zu Fuß? Du kannst auch mit 'nein' ablehnen.", True
         if field == "interest":
             return field, "Möchtest du bestimmte Interessen angeben? Du kannst auch mit 'nein' ablehnen.", True
         return field, f"Optional: {REQUEST_FIELD_LABELS.get(field, field)}. Mit 'nein' überspringen.", True
@@ -774,7 +1560,7 @@ def build_clarification_question(state: Dict[str, Any], missing_fields: List[str
 
 def request_state_to_response(state: Dict[str, Any], question: str) -> str:
     summary_keys = [
-        "trip_type", "start", "end", "base_location", "roundtrip_base", "days", "date", "interest", "pace", "activities_per_day", "missing_fields", "optional_fields_remaining", "selected_pois"
+        "trip_type", "start", "end", "base_location", "origin", "travel_window", "transport_mode", "roundtrip_base", "days", "date", "interest", "pace", "activities_per_day", "missing_fields", "optional_fields_remaining", "selected_pois"
     ]
     return json.dumps(
         {
@@ -833,7 +1619,7 @@ def execute_request_state(state: Dict[str, Any], payload: Dict[str, Any]) -> str
 
     if trip_type == "point_to_point":
         return plan_journey_logic(
-            start=state.get("start"),
+            start=state.get("start") or state.get("origin"),
             end=state.get("end"),
             time_str=default_time,
             route_preferences=route_preferences,
@@ -850,7 +1636,7 @@ def execute_request_state(state: Dict[str, Any], payload: Dict[str, Any]) -> str
         prefs = _derive_multiday_preferences(state)
         base = state.get("base_location")
         return plan_multiday_trip_logic(
-            start=state.get("start") or base,
+            start=state.get("start") or state.get("origin") or base,
             end=state.get("end") or base or state.get("start"),
             days=int(state.get("days") or 3),
             hotel_pref=prefs["hotel_pref"],
@@ -867,7 +1653,7 @@ def execute_request_state(state: Dict[str, Any], payload: Dict[str, Any]) -> str
 
     base = state.get("base_location")
     return plan_complete_trip_logic(
-        start=state.get("start") or base,
+        start=state.get("start") or state.get("origin") or base,
         end=state.get("end") or base or state.get("start"),
         interest=state.get("interest") or "Highlights",
         num_stops=_derive_num_stops(state),
@@ -1829,3 +2615,57 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(json.dumps({"type": "error", "message": f"Backend-Fehler: {exc}"}, ensure_ascii=False))
         except Exception:
             pass
+
+
+
+@app.post("/api/debug/pois")
+def debug_pois(request: Dict[str, Any]):
+    bbox = request.get("bbox")
+
+    if not bbox:
+        raise HTTPException(status_code=400, detail="bbox missing")
+
+    north = bbox.get("north")
+    south = bbox.get("south")
+    east = bbox.get("east")
+    west = bbox.get("west")
+
+    indices = [POI_MAP_INDEX, POI_INDEX]
+
+    query = {
+        "size": 10,
+        "_source": True,
+        "query": {
+            "geo_bounding_box": {
+                "location": {
+                    "top_left": {"lat": north, "lon": west},
+                    "bottom_right": {"lat": south, "lon": east},
+                }
+            }
+        }
+    }
+
+    results = {}
+    total_hits = 0
+
+    for index in indices:
+        try:
+            resp = os_client.search(index=index, body=query)
+            hits = resp.get("hits", {}).get("hits", [])
+
+            results[index] = {
+                "hit_count": len(hits),
+                "sample_docs": [h["_source"] for h in hits[:3]],
+            }
+
+            total_hits += len(hits)
+
+        except Exception as e:
+            results[index] = {"error": str(e)}
+
+    return {
+        "bbox_received": bbox,
+        "indices_checked": indices,
+        "total_hits": total_hits,
+        "index_results": results,
+    }
