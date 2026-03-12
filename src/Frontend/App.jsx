@@ -509,7 +509,7 @@ function inferOperationFromSelection(selection, userText = '', dragOverride = nu
   return null;
 }
 
-function SelectionActions({ selection, pendingOperation, onChooseOperation }) {
+function SelectionActions({ selection, pendingOperation, onChooseOperation, onExecuteOperation }) {
   if (!selection) return null;
   const buttons = [];
   if (selection.selection_type === 'trip') {
@@ -528,6 +528,7 @@ function SelectionActions({ selection, pendingOperation, onChooseOperation }) {
   if (selection.selection_type === 'activity') {
     buttons.push({ operation: 'move_activity', label: 'Standort verschieben' });
     buttons.push({ operation: 'replace_activity', label: 'Aktivität ersetzen' });
+    buttons.push({ operation: 'delete_activity', label: 'Aktivität löschen', direct: true });
     buttons.push({ operation: 'apply_route_preferences', label: 'Umgebung neu routen' });
   }
   if (!buttons.length) return null;
@@ -539,7 +540,9 @@ function SelectionActions({ selection, pendingOperation, onChooseOperation }) {
           <button
             key={button.operation}
             type="button"
-            onClick={() => onChooseOperation({ operation: button.operation, scope: selection.selection_type })}
+            onClick={() => button.direct && onExecuteOperation
+              ? onExecuteOperation({ operation: button.operation, scope: selection.selection_type })
+              : onChooseOperation({ operation: button.operation, scope: selection.selection_type })}
             className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${active ? 'border-slate-800 bg-slate-800 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'}`}
           >
             {button.label}
@@ -903,7 +906,7 @@ function MapPoiDetailsPanel({ poi, isSelected, onToggleSelection, onAddToTrip, o
   const Icon = meta.icon;
 
   return (
-    <div className="absolute right-8 top-24 z-[1000] w-[24rem] max-w-[calc(100%-2rem)] rounded-3xl border border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur-md">
+    <div className="absolute right-8 bottom-8 z-[950] w-[24rem] max-w-[calc(100%-2rem)] max-h-[calc(100%-10rem)] overflow-y-auto rounded-3xl border border-slate-200 bg-white/95 p-5 shadow-2xl backdrop-blur-md">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-xs font-bold text-slate-600">
@@ -1004,7 +1007,7 @@ function RequestStateCard({ parsed }) {
   );
 }
 
-function ChatMessage({ msg, selection, onSelect, onChooseOperation, selectedPois, onTogglePoiSelection, onStartTripPlanningFromPois }) {
+function ChatMessage({ msg, selection, onSelect, onChooseOperation, onExecuteOperation, selectedPois, onTogglePoiSelection, onStartTripPlanningFromPois }) {
   const isAi = msg.sender === 'ai';
   const [isSaved, setIsSaved] = useState(false);
   const parsed = msg.parsed;
@@ -1146,6 +1149,13 @@ function ChatMessage({ msg, selection, onSelect, onChooseOperation, selectedPois
                                 >
                                   Auf Karte verschieben
                                 </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onExecuteOperation?.({ operation: 'delete_activity', scope: 'activity' })}
+                                  className="rounded-lg border border-rose-200 bg-white px-2 py-1 text-[11px] font-bold text-rose-600 hover:border-rose-300"
+                                >
+                                  Löschen
+                                </button>
                               </div>
                             )}
                           </div>
@@ -1256,11 +1266,15 @@ export default function App() {
     return names;
   }, [latestRenderable]);
   const filteredMapPois = useMemo(() => {
-    if (poiTripFilter === 'trip_only') return mapPois.filter((poi) => poi?.is_trip_poi);
-    if (poiTripFilter === 'non_trip') return mapPois.filter((poi) => !poi?.is_trip_poi);
-    if (poiTripFilter === 'selected') return mapPois.filter((poi) => Boolean(selectedPoiMap[buildPoiKey(poi)]));
-    return mapPois;
-  }, [mapPois, poiTripFilter, selectedPoiMap]);
+    let next = [...mapPois];
+    if (poiCategoryFilter !== 'Alle') {
+      next = next.filter((poi) => getCategoryMeta(poi).label === poiCategoryFilter);
+    }
+    if (poiTripFilter === 'trip_only') next = next.filter((poi) => poi?.is_trip_poi);
+    if (poiTripFilter === 'non_trip') next = next.filter((poi) => !poi?.is_trip_poi);
+    if (poiTripFilter === 'selected') next = next.filter((poi) => Boolean(selectedPoiMap[buildPoiKey(poi)]));
+    return next;
+  }, [mapPois, poiCategoryFilter, poiTripFilter, selectedPoiMap]);
 
   useEffect(() => {
 
@@ -1381,7 +1395,6 @@ export default function App() {
           east: bounds.getEast(),
           west: bounds.getWest(),
           limit: 300,
-          category: poiCategoryFilter,
           include_names: tripPoiNames,
           trip_mode: 'all',
         }),
@@ -1395,7 +1408,7 @@ export default function App() {
       setPoiFetchError(error.message || 'POIs konnten nicht geladen werden.');
       setMapPois([]);
     }
-  }, [isMapReady, poiCategoryFilter, tripPoiNames]);
+  }, [isMapReady, tripPoiNames]);
 
   useEffect(() => {
     if (!isMapReady || !mapInstanceRef.current) return undefined;
@@ -1425,16 +1438,10 @@ export default function App() {
     filteredMapPois.forEach((poi) => {
       const selected = Boolean(selectedPoiMap[buildPoiKey(poi)]);
       const marker = window.L.marker([poi.lat, poi.lon], { icon: createPoiMapIcon(window.L, poi) }).addTo(externalPoiLayerRef.current);
-      const popupLines = [
-        `<strong>${poi.name}</strong>`,
-        `<div>${getCategoryMeta(poi).label}</div>`,
-        poi.city ? `<div>${poi.city}</div>` : '',
-        poi.address ? `<div>${poi.address}</div>` : '',
-        poi.description ? `<div style="margin-top:6px;max-width:220px;">${String(poi.description).slice(0, 220)}</div>` : '',
-        poi.is_trip_poi ? '<div style="margin-top:6px;font-weight:600;">Im aktuellen Trip</div>' : '',
-      ].filter(Boolean).join('');
-      marker.bindPopup(popupLines);
       marker.on('click', () => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.closePopup();
+        }
         setActivePoi(poi);
         setSelection({
           selection_type: 'activity',
@@ -1527,9 +1534,16 @@ export default function App() {
           fillOpacity: 1,
         });
       }
-      base.bindPopup(marker.label).addTo(routeLayerRef.current);
+      if (marker.kind !== 'activity') {
+        base.bindPopup(marker.label);
+      }
+      base.addTo(routeLayerRef.current);
       base.on('click', () => {
         if (marker.kind === 'activity') {
+          if (mapInstanceRef.current) {
+            mapInstanceRef.current.closePopup();
+          }
+          setActivePoi(marker.activity || null);
           setSelection(buildSelectionPayload({ kind: 'activity', messageId: latestRenderable?.message?.id, activity: marker.activity, dayIndex: marker.dayIndex, stepIndex: marker.stepIndex }));
         }
       });
@@ -1718,18 +1732,17 @@ export default function App() {
     event.target.value = '';
   };
 
-  const handleSend = (e) => {
-    e.preventDefault();
-    const userText = input.trim();
-    if (!userText) return;
+  const executeStructuredEdit = (operation, userText = '') => {
+    const enrichedSelection = enrichSelectionWithPlanContext(selection, latestRenderable?.data || null);
+    const effectiveOperation = operation || (dragOverride ? inferOperationFromSelection(enrichedSelection, userText, dragOverride) : null);
+    const shouldSendSelectionContext = hasActiveEditIntent(enrichedSelection, effectiveOperation, dragOverride);
+    if (!shouldSendSelectionContext) return;
 
-    setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text: userText }]);
-    setInput('');
+    if (userText.trim()) {
+      setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text: userText }]);
+    }
     setIsLoading(true);
 
-    const enrichedSelection = enrichSelectionWithPlanContext(selection, latestRenderable?.data || null);
-    const effectiveOperation = pendingOperation || (dragOverride ? inferOperationFromSelection(enrichedSelection, userText, dragOverride) : null);
-    const shouldSendSelectionContext = hasActiveEditIntent(enrichedSelection, effectiveOperation, dragOverride);
     const payload = {
       type: 'chat_request',
       session_id: sessionId,
@@ -1743,12 +1756,55 @@ export default function App() {
 
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
+      setPendingOperation(null);
     } else {
       setMessages((prev) => [...prev, { id: Date.now(), sender: 'ai', text: '⚠️ Keine Verbindung zum Server. Läuft das Backend?' }]);
       setIsLoading(false);
       setPendingOperation(null);
     }
   };
+
+  const handleSend = (e) => {
+  e.preventDefault();
+  const userText = input.trim();
+  if (!userText) return;
+
+  setInput('');
+
+  const enrichedSelection = enrichSelectionWithPlanContext(selection, latestRenderable?.data || null);
+  const hasEditIntent = hasActiveEditIntent(enrichedSelection, pendingOperation, dragOverride);
+
+  if (hasEditIntent) {
+    executeStructuredEdit(pendingOperation || null, userText);
+    return;
+  }
+
+  setMessages((prev) => [...prev, { id: Date.now(), sender: 'user', text: userText }]);
+  setIsLoading(true);
+
+  const payload = {
+    type: 'chat_request',
+    session_id: sessionId,
+    text: userText,
+    selection: null,
+    selected_pois: selectedPois,
+    edit_operation: null,
+    drag_override: null,
+    current_trip: null,
+  };
+
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(payload));
+    setPendingOperation(null);
+  } else {
+    setMessages((prev) => [
+      ...prev,
+      { id: Date.now(), sender: 'ai', text: '⚠️ Keine Verbindung zum Server. Läuft das Backend?' },
+    ]);
+    setIsLoading(false);
+    setPendingOperation(null);
+  }
+};
 
   const totalDays = useMemo(() => {
     const data = latestRenderable?.data;
@@ -1775,6 +1831,7 @@ export default function App() {
               onStartTripPlanningFromPois={startTripPlanningFromPois}
               onSelect={(next) => { setSelection(next); setDragOverride(null); setPendingOperation(null); }}
               onChooseOperation={(operation) => setPendingOperation(operation)}
+              onExecuteOperation={(operation) => executeStructuredEdit(operation)}
             />
           ))}
           {isLoading && <div className="text-slate-500 text-sm ml-4">KIRA denkt nach... <Loader2 className="inline animate-spin" /></div>}
@@ -1783,7 +1840,7 @@ export default function App() {
 
         <div className="p-4 bg-white border-t border-slate-100">
           <SelectionBanner selection={selection} dragOverride={dragOverride} pendingOperation={pendingOperation} onClear={clearSelection} />
-          <SelectionActions selection={selection} pendingOperation={pendingOperation} onChooseOperation={setPendingOperation} />
+          <SelectionActions selection={selection} pendingOperation={pendingOperation} onChooseOperation={setPendingOperation} onExecuteOperation={executeStructuredEdit} />
           <form onSubmit={handleSend} className="flex items-center gap-2 mb-2">
             <input
               value={input}

@@ -431,40 +431,272 @@ def _reroute_between_points(
         )
     )
     if isinstance(routed, dict) and routed.get("legs"):
+        apply_trip_endpoint_labels(routed, start_name=start_name, end_name=end_name)
         recalc_trip_total_duration(routed)
         apply_query_preferences(routed, route_preferences)
     return routed
 
 
-def _pick_target_day_and_anchor(current_trip: Dict[str, Any], selection: Optional[Dict[str, Any]], explicit_day_index: Optional[int], explicit_after_step_index: Optional[int]) -> Tuple[Optional[int], Optional[int]]:
+def _find_previous_activity_index(steps: List[Dict[str, Any]], day_indices: List[int], ref_idx: int) -> Optional[int]:
+    for idx in range(ref_idx - 1, -1, -1):
+        if idx not in day_indices:
+            continue
+        if steps[idx].get("type") == "activity":
+            return idx
+    return None
+
+
+def _find_next_trip_index(steps: List[Dict[str, Any]], day_indices: List[int], ref_idx: int) -> Optional[int]:
+    for idx in range(ref_idx + 1, len(steps)):
+        if idx not in day_indices:
+            continue
+        if steps[idx].get("type") == "trip":
+            return idx
+    return None
+
+
+def _find_first_trip_index(steps: List[Dict[str, Any]], day_indices: List[int]) -> Optional[int]:
+    for idx in day_indices:
+        if steps[idx].get("type") == "trip":
+            return idx
+    return None
+
+
+def _find_last_trip_index(steps: List[Dict[str, Any]], day_indices: List[int]) -> Optional[int]:
+    for idx in reversed(day_indices):
+        if steps[idx].get("type") == "trip":
+            return idx
+    return None
+
+
+def _detect_return_like_trip(trip_obj: Dict[str, Any]) -> bool:
+    text_parts: List[str] = []
+    for key in ("title", "description", "start", "end", "location", "label"):
+        value = (trip_obj or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            text_parts.append(value.strip().lower())
+    for leg in (trip_obj or {}).get("legs") or []:
+        for key in ("from", "to"):
+            value = (leg or {}).get(key)
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value.strip().lower())
+    joined = " | ".join(text_parts)
+    markers = [
+        "unterkunft", "hotel", "hostel", "ferienwohnung", "zurück", "rückfahrt", "heim", "home", "check-in", "check out"
+    ]
+    return any(marker in joined for marker in markers)
+
+
+def _determine_day_insert_context(
+    current_trip: Dict[str, Any],
+    selection: Optional[Dict[str, Any]],
+    explicit_day_index: Optional[int],
+    explicit_after_step_index: Optional[int],
+) -> Dict[str, Any]:
     if current_trip.get("type") != "multi_step_plan":
-        return None, None
+        return {"error": "Gezieltes POI-Einfügen wird nur für Mehrtagespläne unterstützt."}
 
     steps = current_trip.get("steps", []) or []
     day_index = explicit_day_index
-    anchor_step_index = explicit_after_step_index
+    selection_type = selection.get("selection_type") if isinstance(selection, dict) else None
+    selection_step_index = selection.get("step_index") if isinstance(selection, dict) else None
 
-    if isinstance(anchor_step_index, int):
-        if not isinstance(day_index, int) and isinstance(selection, dict) and isinstance(selection.get("day_index"), int):
-            day_index = selection.get("day_index")
-        return day_index, anchor_step_index
-
-    if isinstance(selection, dict):
-        if not isinstance(day_index, int) and isinstance(selection.get("day_index"), int):
-            day_index = selection.get("day_index")
-        if selection.get("selection_type") == "activity" and isinstance(selection.get("step_index"), int):
-            return day_index, selection.get("step_index")
-
+    if not isinstance(day_index, int) and isinstance(selection, dict) and isinstance(selection.get("day_index"), int):
+        day_index = selection.get("day_index")
     if not isinstance(day_index, int):
         day_index = 1
 
-    day_step_indices = get_day_step_indices(current_trip, day_index)
-    activity_indices = [idx for idx in day_step_indices if steps[idx].get("type") == "activity"]
-    if not activity_indices:
-        return day_index, None
+    day_indices = get_day_step_indices(current_trip, day_index)
+    if not day_indices:
+        return {"error": f"Tag {day_index} konnte im aktuellen Trip nicht gefunden werden."}
 
-    # Default: append near end of day by anchoring after the last activity.
-    return day_index, activity_indices[-1]
+    # Highest priority: explicit anchor or explicit step selection.
+    if isinstance(explicit_after_step_index, int) and explicit_after_step_index in day_indices:
+        target_step = steps[explicit_after_step_index]
+        if target_step.get("type") == "trip":
+            return {
+                "day_index": day_index,
+                "trip_index": explicit_after_step_index,
+                "anchor_activity_index": _find_previous_activity_index(steps, day_indices, explicit_after_step_index),
+                "insert_mode": "split_selected_trip",
+            }
+        if target_step.get("type") == "activity":
+            next_trip_idx = _find_next_trip_index(steps, day_indices, explicit_after_step_index)
+            return {
+                "day_index": day_index,
+                "trip_index": next_trip_idx,
+                "anchor_activity_index": explicit_after_step_index,
+                "insert_mode": "after_selected_activity",
+            }
+
+    if isinstance(selection_step_index, int) and selection_step_index in day_indices:
+        selected_step = steps[selection_step_index]
+        if selection_type in {"trip", "leg", "step"} and selected_step.get("type") == "trip":
+            return {
+                "day_index": day_index,
+                "trip_index": selection_step_index,
+                "anchor_activity_index": _find_previous_activity_index(steps, day_indices, selection_step_index),
+                "insert_mode": "split_selected_trip",
+            }
+        if selection_type == "activity" and selected_step.get("type") == "activity":
+            next_trip_idx = _find_next_trip_index(steps, day_indices, selection_step_index)
+            return {
+                "day_index": day_index,
+                "trip_index": next_trip_idx,
+                "anchor_activity_index": selection_step_index,
+                "insert_mode": "after_selected_activity",
+            }
+
+    activity_indices = [idx for idx in day_indices if steps[idx].get("type") == "activity"]
+    trip_indices = [idx for idx in day_indices if steps[idx].get("type") == "trip"]
+
+    if activity_indices:
+        trailing_trip_idx = _find_next_trip_index(steps, day_indices, activity_indices[-1])
+        if trailing_trip_idx is not None:
+            trailing_trip = steps[trailing_trip_idx].get("data", {}) or {}
+            insert_mode = "before_return_trip" if _detect_return_like_trip(trailing_trip) else "append_after_last_activity"
+            return {
+                "day_index": day_index,
+                "trip_index": trailing_trip_idx,
+                "anchor_activity_index": activity_indices[-1],
+                "insert_mode": insert_mode,
+            }
+        return {
+            "day_index": day_index,
+            "trip_index": None,
+            "anchor_activity_index": activity_indices[-1],
+            "insert_mode": "append_end_of_day",
+        }
+
+    if trip_indices:
+        selected_trip_idx = _find_last_trip_index(steps, day_indices) or trip_indices[0]
+        return {
+            "day_index": day_index,
+            "trip_index": selected_trip_idx,
+            "anchor_activity_index": None,
+            "insert_mode": "split_day_trip_without_anchor",
+        }
+
+    return {"error": f"Für Tag {day_index} wurde keine passende Einfügeposition gefunden."}
+
+
+def _get_activity_identity(activity: Dict[str, Any]) -> Tuple[Optional[str], Optional[Tuple[float, float]], int]:
+    coords = _resolve_activity_coords(activity)
+    return activity.get("name"), coords, estimate_activity_duration_minutes(activity)
+
+
+def _resolve_selected_day_index(plan_data: Dict[str, Any], selection: Optional[Dict[str, Any]] = None) -> int:
+    selected_day = (selection or {}).get("day_index") if isinstance(selection, dict) else None
+    if isinstance(selected_day, int) and selected_day > 0:
+        return selected_day
+    steps = (plan_data or {}).get("steps", []) or []
+    has_headers = any((step or {}).get("type") == "header" for step in steps)
+    return 1 if not has_headers else 1
+
+
+def _rebuild_day_schedule_from_index(
+    plan_data: Dict[str, Any],
+    day_index: int,
+    start_step_index: int,
+    route_preferences: Dict[str, Any],
+    selection: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    rebuilt_plan = copy.deepcopy(plan_data)
+    day_indices = get_day_step_indices(rebuilt_plan, day_index)
+    if not day_indices:
+        return rebuilt_plan
+    rebuilt_plan["steps"] = _rebuild_remaining_day_trips(
+        rebuilt_plan.get("steps", []) or [],
+        day_indices,
+        start_step_index,
+        route_preferences,
+        selection=selection,
+    )
+    rebuilt_plan["query_preferences"] = dict(rebuilt_plan.get("query_preferences") or {}) | route_preferences
+    return rebuilt_plan
+
+
+def _rebuild_remaining_day_trips(
+    steps: List[Dict[str, Any]],
+    day_indices: List[int],
+    start_step_index: int,
+    route_preferences: Dict[str, Any],
+    selection: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    if not day_indices:
+        return steps
+
+    rebuilt = copy.deepcopy(steps)
+    current_time: Optional[str] = None
+    prev_name: Optional[str] = None
+    prev_coords: Optional[Tuple[float, float]] = None
+
+    for idx in day_indices:
+        step = rebuilt[idx]
+        step_type = step.get("type")
+
+        if idx < start_step_index:
+            if step_type == "trip":
+                current_time = extract_trip_end_time(step.get("data", {})) or current_time
+                _start_name, end_name, _start_coords, end_coords = _extract_trip_endpoints(step.get("data", {}))
+                prev_name = end_name or prev_name
+                prev_coords = end_coords or prev_coords
+            elif step_type == "activity":
+                activity = step.get("data", {}) or {}
+                activity_name, activity_coords, activity_duration = _get_activity_identity(activity)
+                prev_name = activity_name or prev_name
+                prev_coords = activity_coords or prev_coords
+                current_time = shift_clock_time(current_time, activity_duration) or current_time
+            continue
+
+        if step_type == "activity":
+            activity = step.get("data", {}) or {}
+            activity_name, activity_coords, activity_duration = _get_activity_identity(activity)
+            prev_name = activity_name or prev_name
+            prev_coords = activity_coords or prev_coords
+            current_time = shift_clock_time(current_time, activity_duration) or current_time
+            continue
+
+        if step_type != "trip":
+            continue
+
+        original_trip = step.get("data", {}) or {}
+        _orig_start_name, orig_end_name, _orig_start_coords, orig_end_coords = _extract_trip_endpoints(original_trip)
+        departure_time = current_time or extract_trip_start_time(original_trip, "07:30")
+
+        next_activity_idx = next((j for j in day_indices if j > idx and rebuilt[j].get("type") == "activity"), None)
+        if next_activity_idx is not None:
+            next_activity = rebuilt[next_activity_idx].get("data", {}) or {}
+            next_name, next_coords, _dur = _get_activity_identity(next_activity)
+            end_name = next_name or orig_end_name
+            end_coords = next_coords or orig_end_coords
+        else:
+            end_name = orig_end_name
+            end_coords = orig_end_coords
+
+        if (prev_name or prev_coords) and (end_name or end_coords):
+            rerouted = _reroute_between_points(
+                start_name=prev_name,
+                end_name=end_name,
+                start_coords=prev_coords,
+                end_coords=end_coords,
+                time_str=build_tomorrow_time_str(departure_time, departure_time or "07:30"),
+                route_preferences=route_preferences,
+                selection=selection,
+            )
+            if isinstance(rerouted, dict) and rerouted.get("legs"):
+                rebuilt[idx] = {"type": "trip", "data": rerouted}
+                current_time = extract_trip_end_time(rerouted) or departure_time
+                _rstart_name, rend_name, _rstart_coords, rend_coords = _extract_trip_endpoints(rerouted)
+                prev_name = rend_name or end_name or prev_name
+                prev_coords = rend_coords or end_coords or prev_coords
+                continue
+
+        current_time = extract_trip_end_time(original_trip) or departure_time
+        prev_name = end_name or prev_name
+        prev_coords = end_coords or prev_coords
+
+    return rebuilt
 
 
 def insert_poi_into_multiday_plan(
@@ -481,9 +713,13 @@ def insert_poi_into_multiday_plan(
 
     updated = copy.deepcopy(current_trip)
     steps = updated.get("steps", []) or []
-    target_day, anchor_idx = _pick_target_day_and_anchor(updated, selection, day_index, after_step_index)
-    if not isinstance(target_day, int):
-        return {"type": "error", "message": "Kein Zieltag für das Hinzufügen des POI gefunden."}
+    context = _determine_day_insert_context(updated, selection, day_index, after_step_index)
+    if context.get("error"):
+        return {"type": "error", "message": context.get("error")}
+
+    target_day = context.get("day_index")
+    target_trip_idx = context.get("trip_index")
+    anchor_idx = context.get("anchor_activity_index")
 
     activity_data = _build_activity_data_from_poi(poi)
     if activity_data.get("lat") is None or activity_data.get("lon") is None:
@@ -493,64 +729,111 @@ def insert_poi_into_multiday_plan(
     if not day_indices:
         return {"type": "error", "message": f"Tag {target_day} konnte im aktuellen Trip nicht gefunden werden."}
 
-    if anchor_idx is None:
-        return {"type": "error", "message": f"Für Tag {target_day} gibt es noch keine Aktivität, an die der POI angefügt werden kann."}
-    if anchor_idx not in day_indices or steps[anchor_idx].get("type") != "activity":
-        return {"type": "error", "message": "Die Einfügeposition ist ungültig oder verweist nicht auf eine Aktivität."}
+    # Determine insertion baseline. Prefer splitting a concrete selected/day trip. Fallback to appending after anchor activity.
+    target_trip = steps[target_trip_idx].get("data", {}) if isinstance(target_trip_idx, int) and 0 <= target_trip_idx < len(steps) and steps[target_trip_idx].get("type") == "trip" else None
 
-    anchor_activity = steps[anchor_idx].get("data", {}) or {}
-    anchor_coords = _resolve_activity_coords(anchor_activity, selection)
-    if anchor_coords is None:
-        return {"type": "error", "message": "Die Anker-Aktivität hat keine Koordinaten für das Routing."}
+    if target_trip is None and anchor_idx is not None:
+        next_trip_idx = _find_next_trip_index(steps, day_indices, anchor_idx)
+        if isinstance(next_trip_idx, int):
+            target_trip_idx = next_trip_idx
+            target_trip = steps[next_trip_idx].get("data", {}) or {}
 
-    next_trip_idx = next((i for i in range(anchor_idx + 1, len(steps)) if i in day_indices and steps[i].get("type") == "trip"), None)
-    if next_trip_idx is None:
-        return {"type": "error", "message": "Hinter der ausgewählten Aktivität wurde keine anschließende Teilstrecke gefunden."}
+    if anchor_idx is not None:
+        anchor_activity = steps[anchor_idx].get("data", {}) or {}
+        anchor_coords = _resolve_activity_coords(anchor_activity, selection)
+        anchor_name = anchor_activity.get("name")
+    else:
+        anchor_activity = {}
+        anchor_coords = None
+        anchor_name = None
 
-    old_next_trip = steps[next_trip_idx].get("data", {}) or {}
-    old_departure = extract_trip_start_time(old_next_trip, "07:30")
+    if target_trip is not None:
+        old_departure = extract_trip_start_time(target_trip, "07:30")
+        start_name, end_name, start_coords, end_coords = _extract_trip_endpoints(target_trip)
 
-    outbound_trip = _reroute_between_points(
-        start_name=anchor_activity.get("name") or old_next_trip.get("start") or old_next_trip.get("legs", [{}])[0].get("from"),
-        end_name=activity_data.get("name"),
-        start_coords=anchor_coords,
-        end_coords=(activity_data["lat"], activity_data["lon"]),
-        time_str=build_tomorrow_time_str(old_departure, old_departure),
-        route_preferences=route_preferences,
+        outbound_start_name = anchor_name or start_name
+        outbound_start_coords = anchor_coords or start_coords
+        if not outbound_start_name and not outbound_start_coords:
+            return {"type": "error", "message": "Die Einfügeposition hat keine gültigen Startkoordinaten für das Routing."}
+
+        outbound_trip = _reroute_between_points(
+            start_name=outbound_start_name,
+            end_name=activity_data.get("name"),
+            start_coords=outbound_start_coords,
+            end_coords=(activity_data["lat"], activity_data["lon"]),
+            time_str=build_tomorrow_time_str(old_departure, old_departure),
+            route_preferences=route_preferences,
+            selection=selection,
+        )
+        if "legs" not in outbound_trip:
+            return outbound_trip
+
+        arrival_time = extract_trip_end_time(outbound_trip) or old_departure
+        next_departure = shift_clock_time(arrival_time, estimate_activity_duration_minutes(activity_data)) or arrival_time
+        onward_trip = _reroute_between_points(
+            start_name=activity_data.get("name"),
+            end_name=end_name,
+            start_coords=(activity_data["lat"], activity_data["lon"]),
+            end_coords=end_coords,
+            time_str=build_tomorrow_time_str(next_departure, next_departure),
+            route_preferences=route_preferences,
+            selection=selection,
+        )
+        if "legs" not in onward_trip:
+            return onward_trip
+
+        replacement = [{"type": "trip", "data": outbound_trip}, {"type": "activity", "data": activity_data}, {"type": "trip", "data": onward_trip}]
+        updated_steps = list(steps[:target_trip_idx]) + replacement + list(steps[target_trip_idx + 1:])
+        inserted_step_index = target_trip_idx + 1
+    elif anchor_idx is not None:
+        # End-of-day append without an existing following trip.
+        anchor_departure = extract_trip_end_time(steps[_find_next_trip_index(steps, day_indices, anchor_idx)].get("data", {})) if _find_next_trip_index(steps, day_indices, anchor_idx) is not None else None
+        if not anchor_departure:
+            anchor_departure = "17:00"
+        if anchor_coords is None:
+            return {"type": "error", "message": "Die Anker-Aktivität hat keine Koordinaten für das Routing."}
+        outbound_trip = _reroute_between_points(
+            start_name=anchor_name,
+            end_name=activity_data.get("name"),
+            start_coords=anchor_coords,
+            end_coords=(activity_data["lat"], activity_data["lon"]),
+            time_str=build_tomorrow_time_str(anchor_departure, anchor_departure),
+            route_preferences=route_preferences,
+            selection=selection,
+        )
+        if "legs" not in outbound_trip:
+            return outbound_trip
+        replacement = [{"type": "trip", "data": outbound_trip}, {"type": "activity", "data": activity_data}]
+        updated_steps = list(steps[:anchor_idx + 1]) + replacement + list(steps[anchor_idx + 1:])
+        inserted_step_index = anchor_idx + 2
+    else:
+        return {"type": "error", "message": "Für den ausgewählten Tag konnte keine gültige Einfügeposition mit Routing-Basis bestimmt werden."}
+
+    refreshed_day_indices = get_day_step_indices({**updated, "steps": updated_steps}, target_day)
+    if target_trip is not None and isinstance(target_trip_idx, int):
+        rebuild_start_index = target_trip_idx
+    elif anchor_idx is not None:
+        rebuild_start_index = anchor_idx + 1
+    else:
+        rebuild_start_index = inserted_step_index + 1
+    updated_steps = _rebuild_remaining_day_trips(
+        updated_steps,
+        refreshed_day_indices,
+        rebuild_start_index,
+        route_preferences,
         selection=selection,
     )
-    if "legs" not in outbound_trip:
-        return outbound_trip
 
-    onward_start_name, onward_end_name, _onward_start_coords, onward_end_coords = _extract_trip_endpoints(old_next_trip)
-    arrival_time = extract_trip_end_time(outbound_trip) or old_departure
-    next_departure = shift_clock_time(arrival_time, estimate_activity_duration_minutes(activity_data)) or arrival_time
-    onward_trip = _reroute_between_points(
-        start_name=activity_data.get("name"),
-        end_name=onward_end_name,
-        start_coords=(activity_data["lat"], activity_data["lon"]),
-        end_coords=onward_end_coords,
-        time_str=build_tomorrow_time_str(next_departure, next_departure),
-        route_preferences=route_preferences,
-        selection=selection,
-    )
-    if "legs" not in onward_trip:
-        return onward_trip
-
-    activity_step = {"type": "activity", "data": activity_data}
-    outbound_step = {"type": "trip", "data": outbound_trip}
-    onward_step = {"type": "trip", "data": onward_trip}
-
-    updated_steps = list(steps[:next_trip_idx]) + [outbound_step, activity_step, onward_step] + list(steps[next_trip_idx + 1:])
     updated["steps"] = updated_steps
     updated["query_preferences"] = dict(updated.get("query_preferences") or {}) | route_preferences
     updated["selection"] = {
         "selection_type": "activity",
         "day_index": target_day,
-        "step_index": next_trip_idx + 1,
+        "step_index": inserted_step_index,
         "label": activity_data.get("name"),
         "name": activity_data.get("name"),
         "coords": [activity_data.get("lat"), activity_data.get("lon")],
+        "insert_mode": context.get("insert_mode"),
     }
     return updated
 
@@ -727,6 +1010,7 @@ EDIT_OPERATION_SCHEMA: Dict[str, Any] = {
                 "reroute_day",
                 "move_activity",
                 "replace_activity",
+                "delete_activity",
                 "apply_route_preferences",
             ],
         },
@@ -2016,6 +2300,8 @@ def infer_edit_operation(payload: Dict[str, Any], route_preferences: Dict[str, A
     if selection_type == "activity":
         if drag_override:
             return {"operation": "move_activity", "scope": "activity", "route_preferences": route_preferences}
+        if any(word in text for word in ["lösch", "loesch", "delete", "entfern", "remove"]):
+            return {"operation": "delete_activity", "scope": "activity", "route_preferences": route_preferences}
         if any(word in text for word in ["ersetz", "replace", "ander", "andere"]):
             return {"operation": "replace_activity", "scope": "activity", "route_preferences": route_preferences}
         return {"operation": "apply_route_preferences", "scope": "activity", "route_preferences": route_preferences}
@@ -2118,6 +2404,25 @@ def apply_query_preferences(trip_obj: Dict[str, Any], route_preferences: Dict[st
     trip_obj["query_preferences"] = merged
 
 
+def apply_trip_endpoint_labels(
+    trip_obj: Dict[str, Any],
+    *,
+    start_name: Optional[str] = None,
+    end_name: Optional[str] = None,
+) -> None:
+    if not isinstance(trip_obj, dict):
+        return
+    legs = list(trip_obj.get("legs") or [])
+    if start_name:
+        trip_obj["start"] = start_name
+        if legs:
+            legs[0]["from"] = start_name
+    if end_name:
+        trip_obj["end"] = end_name
+        if legs:
+            legs[-1]["to"] = end_name
+
+
 def _valid_coords(coords: Any) -> bool:
     return (
         isinstance(coords, (list, tuple))
@@ -2164,6 +2469,8 @@ def reroute_trip_object(
             selection=selection,
         )
     )
+    if isinstance(result, dict) and result.get("legs"):
+        apply_trip_endpoint_labels(result, start_name=start_name, end_name=end_name)
     return result
 
 
@@ -2201,9 +2508,18 @@ def find_selected_trip_ref(current_trip: Dict[str, Any], selection: Dict[str, An
 def get_day_step_indices(current_trip: Dict[str, Any], day_index: int):
     if current_trip.get("type") != "multi_step_plan":
         return []
+
+    steps = current_trip.get("steps", []) or []
+    has_headers = any((step or {}).get("type") == "header" for step in steps)
+
+    # Single-day plans currently use multi_step_plan without day headers.
+    # In that case the full plan is effectively Tag 1.
+    if not has_headers:
+        return list(range(len(steps))) if int(day_index or 1) == 1 else []
+
     current_day = 0
     collected = []
-    for idx, step in enumerate(current_trip.get("steps", [])):
+    for idx, step in enumerate(steps):
         if step.get("type") == "header":
             current_day += 1
             continue
@@ -2350,6 +2666,7 @@ def update_adjacent_trips_for_activity(
             selection=selection,
         )
         if "legs" in rerouted_prev:
+            apply_trip_endpoint_labels(rerouted_prev, end_name=activity.get("name"))
             steps[prev_trip_idx]["data"] = rerouted_prev
 
     if next_trip_idx is not None:
@@ -2367,6 +2684,7 @@ def update_adjacent_trips_for_activity(
             time_override=next_time_override,
         )
         if "legs" in rerouted_next:
+            apply_trip_endpoint_labels(rerouted_next, start_name=activity.get("name"))
             steps[next_trip_idx]["data"] = rerouted_next
 
     refreshed_selection = dict(selection or {})
@@ -2379,6 +2697,16 @@ def update_adjacent_trips_for_activity(
     steps[step_index]["data"] = activity
     updated["selection"] = refreshed_selection or selection
     updated["query_preferences"] = dict(updated.get("query_preferences") or {}) | route_preferences
+
+    day_index = _resolve_selected_day_index(updated, selection)
+    rebuild_from_idx = next_trip_idx if isinstance(next_trip_idx, int) else step_index + 1
+    updated = _rebuild_day_schedule_from_index(
+        updated,
+        day_index,
+        rebuild_from_idx,
+        route_preferences,
+        selection=updated.get("selection") or selection,
+    )
     return updated
 
 
@@ -2431,6 +2759,125 @@ def replace_activity_in_plan(
         {"coords": [replacement["lat"], replacement["lon"]]},
         replacement_selection,
     )
+
+
+def delete_activity_from_plan(
+    plan_data: Dict[str, Any],
+    step_index: int,
+    selection: Dict[str, Any],
+    route_preferences: Dict[str, Any],
+) -> Dict[str, Any]:
+    updated = copy.deepcopy(plan_data)
+    steps = updated.get("steps", []) or []
+    if step_index < 0 or step_index >= len(steps) or steps[step_index].get("type") != "activity":
+        return {"type": "error", "message": "Ausgewählte Aktivität nicht gefunden."}
+
+    day_index = selection.get("day_index")
+    if not isinstance(day_index, int):
+        day_index = 1
+
+    day_indices = get_day_step_indices(updated, day_index)
+    if not day_indices:
+        return {"type": "error", "message": "Tag der ausgewählten Aktivität konnte nicht bestimmt werden."}
+
+    activity = steps[step_index].get("data", {}) or {}
+    activity_name, activity_coords, activity_duration = _get_activity_identity(activity)
+
+    prev_activity_idx = next((i for i in range(step_index - 1, -1, -1) if i in day_indices and steps[i].get("type") == "activity"), None)
+    prev_trip_idx = next((i for i in range(step_index - 1, -1, -1) if i in day_indices and steps[i].get("type") == "trip"), None)
+    next_activity_idx = next((i for i in day_indices if i > step_index and steps[i].get("type") == "activity"), None)
+    next_trip_idx = next((i for i in day_indices if i > step_index and steps[i].get("type") == "trip"), None)
+
+    source_name = None
+    source_coords = None
+    departure_time = None
+
+    if prev_activity_idx is not None:
+        prev_activity = steps[prev_activity_idx].get("data", {}) or {}
+        source_name, source_coords, prev_duration = _get_activity_identity(prev_activity)
+        incoming_trip_idx = next((i for i in day_indices if prev_activity_idx < i < step_index and steps[i].get("type") == "trip"), None)
+        if incoming_trip_idx is not None:
+            departure_time = extract_trip_end_time(steps[incoming_trip_idx].get("data", {}))
+        departure_time = shift_clock_time(departure_time, prev_duration) or departure_time
+    elif prev_trip_idx is not None:
+        prev_trip = steps[prev_trip_idx].get("data", {}) or {}
+        source_name, _old_end_name, source_coords, _old_end_coords = _extract_trip_endpoints(prev_trip)
+        departure_time = extract_trip_start_time(prev_trip, "07:30")
+    else:
+        source_name = activity_name
+        source_coords = activity_coords
+        departure_time = extract_trip_start_time(steps[next_trip_idx].get("data", {}), "07:30") if next_trip_idx is not None else "07:30"
+
+    target_name = None
+    target_coords = None
+
+    if next_activity_idx is not None:
+        next_activity = steps[next_activity_idx].get("data", {}) or {}
+        target_name, target_coords, _dur = _get_activity_identity(next_activity)
+    elif next_trip_idx is not None:
+        next_trip = steps[next_trip_idx].get("data", {}) or {}
+        _old_start_name, target_name, _old_start_coords, target_coords = _extract_trip_endpoints(next_trip)
+
+    updated_steps = copy.deepcopy(steps)
+
+    if prev_trip_idx is not None and next_trip_idx is not None and (target_name or target_coords) and (source_name or source_coords):
+        combined_trip = _reroute_between_points(
+            start_name=source_name,
+            end_name=target_name,
+            start_coords=source_coords,
+            end_coords=target_coords,
+            time_str=build_tomorrow_time_str(departure_time, departure_time or "07:30"),
+            route_preferences=route_preferences,
+            selection=selection,
+        )
+        if "legs" not in combined_trip:
+            return combined_trip
+
+        del updated_steps[next_trip_idx]
+        del updated_steps[step_index]
+        updated_steps[prev_trip_idx] = {"type": "trip", "data": combined_trip}
+        rebuild_anchor = prev_trip_idx + 1
+    elif prev_trip_idx is not None:
+        del updated_steps[step_index]
+        del updated_steps[prev_trip_idx]
+        rebuild_anchor = prev_trip_idx
+    elif next_trip_idx is not None and (target_name or target_coords) and (source_name or source_coords):
+        rerouted_next = _reroute_between_points(
+            start_name=source_name,
+            end_name=target_name,
+            start_coords=source_coords,
+            end_coords=target_coords,
+            time_str=build_tomorrow_time_str(departure_time, departure_time or "07:30"),
+            route_preferences=route_preferences,
+            selection=selection,
+        )
+        if "legs" not in rerouted_next:
+            return rerouted_next
+
+        del updated_steps[step_index]
+        updated_steps[next_trip_idx - 1] = {"type": "trip", "data": rerouted_next}
+        rebuild_anchor = next_trip_idx
+    else:
+        del updated_steps[step_index]
+        rebuild_anchor = step_index
+
+    refreshed_day_indices = get_day_step_indices({**updated, "steps": updated_steps}, day_index)
+    updated_steps = _rebuild_remaining_day_trips(
+        updated_steps,
+        refreshed_day_indices,
+        rebuild_anchor,
+        route_preferences,
+        selection=selection,
+    )
+
+    updated["steps"] = updated_steps
+    updated["query_preferences"] = dict(updated.get("query_preferences") or {}) | route_preferences
+    updated["selection"] = {
+        "selection_type": "day",
+        "day_index": day_index,
+        "label": f"Tag {day_index}",
+    }
+    return updated
 
 
 def apply_deterministic_edit(payload: Dict[str, Any]) -> Optional[str]:
@@ -2502,6 +2949,12 @@ def apply_deterministic_edit(payload: Dict[str, Any]) -> Optional[str]:
         if not isinstance(step_index, int):
             return None
         return json.dumps(replace_activity_in_plan(updated, step_index, selection, route_preferences, payload.get("text", "")), ensure_ascii=False)
+
+    if operation["operation"] == "delete_activity" and updated.get("type") == "multi_step_plan":
+        step_index = selection.get("step_index")
+        if not isinstance(step_index, int):
+            return None
+        return json.dumps(delete_activity_from_plan(updated, step_index, selection, route_preferences), ensure_ascii=False)
 
     if operation["operation"] in {"move_activity", "apply_route_preferences"} and updated.get("type") == "multi_step_plan":
         step_index = selection.get("step_index")
