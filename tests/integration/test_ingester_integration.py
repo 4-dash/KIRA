@@ -15,7 +15,7 @@ sys.modules['llama_index.embeddings.azure_openai'] = MagicMock()
 sys.modules['llama_index.vector_stores'] = MagicMock()
 sys.modules['llama_index.vector_stores.opensearch'] = MagicMock()
 
-from Backend.Ingester.ingestor_v2 import RichLlamaIngestor, safe_float, parse_location_string
+from Backend.Ingester.ingestor_v2 import RichLlamaIngestor, safe_float, parse_location_value
 
 
 class TestIngesterIntegration:

@@ -22,7 +22,7 @@ sys.modules['llama_index.vector_stores.opensearch'] = MagicMock()
 
 from Backend.Ingester.ingestor_v2 import (
     safe_float,
-    parse_location_string,
+    parse_location_value,
     clean_html,
     derive_type_from_filename,
     format_opening_hours,
@@ -54,35 +54,35 @@ class TestSafeFloat:
 
 
 class TestParseLocationString:
-    """Test parse_location_string utility function."""
+    """Test parse_location_value utility function."""
 
     def test_parse_valid_location(self):
         """Test parsing valid comma-separated coordinates."""
-        lat, lon = parse_location_string("48.1351, 11.5820")
+        lat, lon = parse_location_value("48.1351, 11.5820")
         assert lat == 48.1351
         assert lon == 11.5820
 
     def test_parse_location_with_whitespace(self):
         """Test parsing coordinates with extra whitespace."""
-        lat, lon = parse_location_string("  48.1351  ,  11.5820  ")
+        lat, lon = parse_location_value("  48.1351  ,  11.5820  ")
         assert lat == 48.1351
         assert lon == 11.5820
 
     def test_parse_location_invalid(self):
         """Test handling of invalid location strings."""
-        lat, lon = parse_location_string("invalid")
+        lat, lon = parse_location_value("invalid")
         assert lat is None
         assert lon is None
 
     def test_parse_location_none(self):
         """Test handling of None."""
-        lat, lon = parse_location_string(None)
+        lat, lon = parse_location_value(None)
         assert lat is None
         assert lon is None
 
     def test_parse_location_partial(self):
         """Test handling of incomplete location string."""
-        lat, lon = parse_location_string("48.1351")
+        lat, lon = parse_location_value("48.1351")
         assert lat is None
         assert lon is None
 
