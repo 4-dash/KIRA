@@ -132,3 +132,4 @@ dist-ssr
 src/otp-data/graph.obj
 src/otp-data/gtfs.zip
 src/otp-data/schwaben-latest.osm.pbf
+src/repo.zip

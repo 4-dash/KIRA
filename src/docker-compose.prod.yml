@@ -33,5 +33,5 @@ networks:
     external: true
 
 volumes:
-  kira-opensearch-data:
+  opensearch-data:
   bc-data:

@@ -10,3 +10,4 @@ llama-index
 llama-index-embeddings-azure-openai
 llama-index-embeddings-huggingface
 llama-index-vector-stores-opensearch
+python-dotenv

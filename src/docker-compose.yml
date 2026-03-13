@@ -27,7 +27,7 @@ services:
         soft: 65536
         hard: 65536
     volumes:
-      - kira-opensearch-data:/usr/share/opensearch/data
+      - opensearch-data:/usr/share/opensearch/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
@@ -86,8 +86,10 @@ services:
       - OPENSEARCH_PORT=9200
       - OTP_URL=http://otp:8080/otp/routers/default/index/graphql
       - BAYERNCLOUD_DATA_DIR=/data/bayerncloud
+      - GNTB_DATA_DIR=/data/gntb
     volumes:
       - bc-data:/data/bayerncloud
+      - gntb-data:/data/gntb
     depends_on:
       - opensearch
     command: ["sleep", "infinity"]
@@ -105,11 +107,32 @@ services:
       - .env
     environment:
       - BAYERNCLOUD_DATA_DIR=/data/bayerncloud
+      - GNTB_DATA_DIR=/data/gntb
     volumes:
       - bc-data:/data/bayerncloud
+      - gntb-data:/data/gntb
     command: ["python", "bayerncloud_fetch.py"]
     restart: "no"
 
+  # GNTB fetch + transform (optional): downloads DZT/GNTB KG JSON and writes
+  # normalized gntb_clean.json into the shared gntb-data volume.
+  # Use:
+  #   docker-compose --profile ingest run --rm gntb-fetch-transform
+  gntb-fetch-transform:
+    profiles: ["ingest"]
+    build:
+      context: ./Backend/Ingester
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - GNTB_DATA_DIR=/data/gntb
+    volumes:
+      - gntb-data:/data/gntb
+    command: ["bash", "-lc", "python gntb_fetch_allgaeu.py && python gntb_transform.py"]
+    restart: "no"
+
 volumes:
-  kira-opensearch-data:
+  opensearch-data:
   bc-data:
+  gntb-data:
