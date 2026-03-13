@@ -4,6 +4,7 @@ python-dotenv>=1.0
 requests>=2.31
 opensearch-py>=2.4
 openai>=1.30
+shapely>=2.1.2
 
 # MCP / agent server deps (kept because monolith imports MCP/agent_server.py)
 fastmcp>=0.3
